@@ -898,3 +898,27 @@ fn test_qa_replay() {
     }
     assert!(files_tested > 0, "No replay fixtures found");
 }
+
+// ─── 蒸餾管線確定性審查（TokenOverlapAuditor，0 token）────────────────────────
+
+#[test]
+fn test_audit_distillation_rejects_empty() {
+    let original = "原始對話內容\n".repeat(100);
+    assert!(crate::memory::audit_distillation(&original, "").is_err());
+    assert!(crate::memory::audit_distillation(&original, "   \n  ").is_err());
+}
+
+#[test]
+fn test_audit_distillation_rejects_growth() {
+    let original = "短文";
+    let bloated = "這段蒸餾結果反而比原文更長，違反壓縮的基本定義".repeat(10);
+    let err = crate::memory::audit_distillation(original, &bloated).unwrap_err();
+    assert!(err.contains("TokenOverlapAuditor"));
+}
+
+#[test]
+fn test_audit_distillation_passes_compression() {
+    let original = "關鍵參數 timeout=30 路徑 C:/work/app 決策：採用方案 B\n".repeat(50);
+    let distilled = "timeout=30；路徑 C:/work/app；決策：方案 B";
+    assert!(crate::memory::audit_distillation(&original, distilled).is_ok());
+}
