@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agnes AI - IDE Coding Assistant</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-window">
+    <!-- Main Left Sidebar -->
+    <aside class="main-sidebar">
+      <div class="sidebar-header">
+        <div class="app-indicator">
+          <div class="glow-dot"></div>
+          <span class="app-title">Agnes AI</span>
+        </div>
+      </div>
+      
+      <!-- New unified navigation sidebar matching Antigravity 2.0 -->
+      <div class="unified-nav-container">
+        <button class="btn-new-chat-sidebar" id="btn-new-chat">
+          <span class="plus-icon">+</span> New Conversation
+        </button>
+        
+        <div class="sidebar-menu-items">
+          <div class="menu-item active" id="sidebar-btn-history">
+            <span class="menu-icon">💬</span>
+            <span class="menu-text">Conversation History</span>
+          </div>
+          <div class="menu-item" id="sidebar-btn-scheduled">
+            <span class="menu-icon">📅</span>
+            <span class="menu-text">Scheduled Tasks</span>
+          </div>
+        </div>
+
+        <!-- Projects list tree -->
+        <div class="sidebar-projects-container">
+          <div class="projects-section-header">
+            <span class="projects-title">Projects</span>
+            <div class="projects-header-actions">
+              <button class="icon-btn btn-filter" title="篩選專案">
+                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M10 18h4v-2h-4v2zM3 6v2h18V6H3zm3 7h12v-2H6v2z"/></svg>
+              </button>
+              <button class="icon-btn btn-add-project" id="btn-project-plus" title="新增專案">
+                <svg viewBox="0 0 24 24" width="14" height="14"><path fill="currentColor" d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+              </button>
+              <!-- Project Action Dropdown -->
+              <div class="project-context-menu" id="project-plus-dropdown">
+                <div class="menu-option" id="menu-new-project">📂 New Project</div>
+                <div class="menu-option" id="menu-quick-start">🚀 Quick Start</div>
+              </div>
+            </div>
+          </div>
+          <div class="projects-list" id="projects-list">
+            <!-- Dynamically populated project-grouped conversations -->
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <button class="settings-footer-btn" id="btn-settings-footer">
+          <span class="settings-icon">⚙️</span> Settings
+        </button>
+      </div>
+    </aside>
+
+    <!-- Main Workspace Container -->
+    <main class="main-workspace">
+      <!-- Workspace Header -->
+      <header class="workspace-header">
+        <div class="breadcrumb">
+          <span class="folder-name" id="breadcrumb-project-name">Agnes-AI</span>
+          <span class="separator">/</span>
+          <span class="branch-selector" id="breadcrumb-task-name">🌿 main</span>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-open-ide">💻 開啟 IDE</button>
+          <button class="btn-layout-toggle" id="btn-toggle-right-sidebar" title="切換右側側邊欄 (專案檔案/子代理人)">
+            <svg viewBox="0 0 24 24" width="16" height="16">
+              <path fill="currentColor" d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2zm0 2v12h11V6H4zm13 0v12h3V6h-3z"/>
+            </svg>
+          </button>
+          <div class="window-controls">
+            <span class="dot red"></span>
+            <span class="dot yellow"></span>
+            <span class="dot green"></span>
+          </div>
+        </div>
+      </header>
+
+      <!-- Chat View Screen -->
+      <div class="chat-container">
+        <!-- Message list -->
+        <div class="chat-messages" id="chat-messages-container">
+          <div class="message system">
+            <div class="msg-avatar">🛡️</div>
+            <div class="msg-content">
+              <h3>系統就緒</h3>
+              <p>Agnes AI 核心已載入。本機狀態機資料庫與 Exit-Code 自動對齊機制已激活。請在下方輸入提示詞，我將自動撰寫程式碼並在防禦沙盒中編譯測試。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tool execution trace pane (collapsible) -->
+        <div class="execution-trace-panel collapsed" id="execution-trace">
+          <div class="trace-header">
+            <h3>⚙️ 沙盒執行軌跡 (Exit-Code 對齊)</h3>
+            <button class="btn-toggle" id="btn-toggle-trace">展開日誌</button>
+          </div>
+          <div class="trace-body" id="trace-logs-body">
+            <div class="text-muted font-mono">// 待命，等待指令執行...</div>
+          </div>
+        </div>
+
+        <!-- Tool Execution Approval Dialog (Require User Approval) -->
+        <div class="approval-panel" id="approval-panel" style="display: none;">
+          <div class="approval-header">
+            <h3>⚠️ 執行確認防線 (Require User Approval)</h3>
+          </div>
+          <div class="approval-body">
+            <p>自主智慧體提出了以下工具呼叫，需要您的授權才可執行：</p>
+            <div id="approval-tools-list" class="approval-tools-list"></div>
+          </div>
+          <div class="approval-actions">
+            <button class="btn btn-primary" id="btn-approve-step">核准執行 (Approve)</button>
+            <button class="btn btn-danger" id="btn-reject-step">否決並回饋 (Reject)</button>
+          </div>
+          <div class="rejection-feedback-container" id="rejection-feedback-container" style="display:none; margin-top:10px;">
+            <textarea id="rejection-feedback-input" placeholder="請輸入否決原因/調整建議..."></textarea>
+            <button class="btn btn-secondary btn-sm" id="btn-submit-rejection" style="margin-top:5px; float:right;">送出反饋</button>
+          </div>
+        </div>
+
+        <!-- Input Box Area (Codex Mockup alignment) -->
+        <div class="chat-input-wrapper">
+          <div class="chat-input-container">
+            <textarea id="prompt-input" rows="1" placeholder="我們該在目前專案中建立什麼？"></textarea>
+            
+            <div class="input-controls">
+              <div class="control-group">
+                <button class="control-btn" title="附加檔案">📎</button>
+                <div class="dropdown-selector" id="permission-dropdown">
+                  <span class="badge badge-warning">🛡️ 完整存取權</span>
+                </div>
+                <div class="dropdown-selector" id="model-dropdown">
+                  <span class="model-badge">agnes-2.0-flash (Ava)</span>
+                </div>
+              </div>
+              
+              <div class="control-group">
+                <button class="control-btn" title="語音輸入">🎤</button>
+                <button class="btn-send" id="btn-send-message" title="發送指令">
+                  <svg viewBox="0 0 24 24" width="16" height="16">
+                    <path fill="currentColor" d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Collapsible Right Sidebar Panel (Tab workspace files & Tab subagents) -->
+    <aside class="right-sidebar collapsed" id="right-sidebar">
+      <div class="right-sidebar-header">
+        <div class="right-sidebar-tabs">
+          <button class="right-sidebar-tab-btn active" data-right-tab="right-tab-workspace">📁 專案檔案</button>
+          <button class="right-sidebar-tab-btn" data-right-tab="right-tab-subagents">👥 子代理人</button>
+        </div>
+      </div>
+      <div class="right-sidebar-content">
+        <!-- Tab 1: Workspace Files -->
+        <div class="right-tab-pane active" id="right-tab-workspace">
+          <div class="sidebar-section-title">專案工作區</div>
+          <div class="workspace-selector">
+            <input type="text" id="workspace-path-input" value="C:\Users\MasterYee\Documents\Program\Agnes-AI" placeholder="專案路徑...">
+            <button class="btn btn-secondary btn-sm" id="btn-load-workspace">載入</button>
+          </div>
+          <div class="file-tree-container" id="file-tree">
+            <!-- Files will be injected here -->
+            <div class="text-muted text-center py-20">點擊載入專案檔案...</div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Subagents -->
+        <div class="right-tab-pane" id="right-tab-subagents">
+          <div class="sidebar-section-title">17 子代理人監控</div>
+          <div class="subagents-list" id="subagents-sidebar-list">
+            <!-- Render list of subagents with sleeping/active indicators -->
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Fullscreen Settings Overlay Modal -->
+  <div class="settings-overlay" id="settings-overlay">
+    <div class="settings-modal-window">
+      <!-- Left sidebar in modal -->
+      <aside class="settings-modal-sidebar">
+        <div class="settings-sidebar-header">
+          <button class="btn-back" id="btn-close-settings">← 返回應用程式</button>
+          <div class="search-box">
+            <input type="text" placeholder="搜尋設定...">
+          </div>
+        </div>
+        <div class="settings-nav-group">
+          <div class="nav-group-title">個人</div>
+          <button class="settings-nav-btn active" data-settings-pane="settings-general">⚙️ 一般</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-profile">👤 個人檔案</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-appearance">☀️ 外觀</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-keymap">⌨️ 鍵盤快捷鍵</button>
+        </div>
+        <div class="settings-nav-group">
+        <div class="nav-group-title">整合</div>
+          <button class="settings-nav-btn" data-settings-pane="settings-mcp">🔌 MCP 伺服器</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-browser">🌐 瀏覽器</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-computer-use">🖱️ Computer use</button>
+        </div>
+        <div class="settings-nav-group" style="display:none;">
+          <button class="settings-nav-btn" data-settings-pane="project-settings-pane">專案設定</button>
+        </div>
+        <div class="settings-nav-group">
+          <div class="nav-group-title">程式設計</div>
+          <button class="settings-nav-btn" data-settings-pane="settings-hooks">⚓ 掛勾</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-git">🌿 Git</button>
+          <button class="settings-nav-btn" data-settings-pane="settings-env">📁 環境</button>
+        </div>
+        <div class="settings-nav-group">
+          <div class="nav-group-title">Projects</div>
+          <div id="settings-projects-list-nav" style="display:flex; flex-direction:column; gap:4px;">
+            <!-- Dynamically populated projects list in settings -->
+          </div>
+        </div>
+      </aside>
+      
+      <!-- Right content pane in modal -->
+      <main class="settings-modal-content">
+        <!-- Pane: General Settings -->
+        <div id="settings-general" class="settings-pane active">
+          <h2 class="settings-pane-title">一般</h2>
+          
+          <div class="settings-section">
+            <h3>工作模式</h3>
+            <p class="settings-section-desc">選擇 Agnes AI 要顯示多少技術細節</p>
+            <div class="work-mode-cards">
+              <div class="work-mode-card active" data-work-mode="programming">
+                <div class="card-radio"></div>
+                <div class="card-details">
+                  <h4>用於程式設計</h4>
+                  <p>更技術性的回應與控制</p>
+                </div>
+              </div>
+              <div class="work-mode-card" data-work-mode="daily">
+                <div class="card-radio"></div>
+                <div class="card-details">
+                  <h4>適合日常工作</h4>
+                  <p>同樣強大，技術細節更少</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="settings-section">
+            <h3>權限</h3>
+            <div class="permission-item">
+              <div class="permission-info">
+                <h4>預設權限</h4>
+                <p>預設情況下，Agnes AI 可讀取及編輯其工作區中的檔案。需要時可要求額外存取權限。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="settings-default-permissions" checked>
+                <span class="slider"></span>
+              </label>
+            </div>
+            
+            <div class="permission-item">
+              <div class="permission-info">
+                <h4>自動審查</h4>
+                <p>Agnes AI 可以讀取並編輯其工作區中的檔案。Agnes AI 會自動審查額外存取的要求。自動審查可能會出錯。瞭解更多有關較高風險的資訊。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="settings-auto-review">
+                <span class="slider"></span>
+              </label>
+            </div>
+            
+            <div class="permission-item">
+              <div class="permission-info">
+                <h4>完整存取權</h4>
+                <p>當 Agnes AI 以完整存取權限執行時，它可編輯你電腦上的任何檔案，並在未經你同意的情況下執行可連網的命令。這會大幅增加資料遺失、外洩或非預期行為的風險。深入了解高風險帶來的風險。</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="settings-full-access">
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+          
+          <div class="settings-section">
+            <h3>一般</h3>
+            <div class="general-grid">
+              <div class="general-form-group">
+                <label>預設開啟目的地</label>
+                <select id="settings-open-dest">
+                  <option value="Agnes">Agnes AI</option>
+                  <option value="VSCode">VS Code</option>
+                </select>
+              </div>
+              <div class="general-form-group">
+                <label>整合的終端 Shell</label>
+                <select id="settings-shell">
+                  <option value="PowerShell">PowerShell</option>
+                  <option value="cmd">cmd.exe</option>
+                </select>
+              </div>
+              <div class="general-form-group">
+                <label>語言</label>
+                <select id="settings-lang">
+                  <option value="auto">自動偵測</option>
+                  <option value="zh-TW">繁體中文 (zh-TW)</option>
+                  <option value="en">English (en)</option>
+                </select>
+              </div>
+              <div class="general-form-group">
+                <label>逾時限制 (秒)</label>
+                <input type="number" id="settings-timeout-num" value="30">
+              </div>
+              <div class="general-form-group">
+                <label>最大重試次數 (自愈)</label>
+                <input type="number" id="settings-retries-num" value="3">
+              </div>
+            </div>
+            
+            <div class="permission-item" style="margin-top:20px;">
+              <div class="permission-info">
+                <h4>Bottom panel</h4>
+                <p>Show the bottom panel control in the app header</p>
+              </div>
+              <label class="switch">
+                <input type="checkbox" id="settings-bottom-panel">
+                <span class="slider"></span>
+              </label>
+            </div>
+            
+            <div class="review-row">
+              <div class="review-label">
+                <h4>程式碼審查</h4>
+                <p>可行時在目前聊天中開始 /review，或啟動另一個獨立的審查聊天</p>
+              </div>
+              <div class="btn-group">
+                <button class="btn btn-secondary active" id="btn-review-inline">內嵌</button>
+                <button class="btn btn-secondary" id="btn-review-independent">獨立</button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="settings-section" style="margin-top:20px;">
+            <button class="btn btn-primary" id="btn-save-general-settings">儲存一般設定</button>
+          </div>
+        </div>
+        
+        <!-- Pane: Profile Settings -->
+        <div id="settings-profile" class="settings-pane">
+          <h2 class="settings-pane-title">個人檔案</h2>
+          <p class="text-muted" style="margin-top:15px;">設定您的使用者個人檔案與帳戶連結。</p>
+        </div>
+        
+        <!-- Pane: Appearance Settings -->
+        <div id="settings-appearance" class="settings-pane">
+          <h2 class="settings-pane-title">外觀</h2>
+          <p class="text-muted" style="margin-top:15px;">自訂您的視窗主題、配色方案與字體大小。</p>
+        </div>
+        
+        <!-- Pane: Keymap Settings -->
+        <div id="settings-keymap" class="settings-pane">
+          <h2 class="settings-pane-title">鍵盤快捷鍵</h2>
+          <p class="text-muted" style="margin-top:15px;">配置並管理編輯器與命令快捷鍵。</p>
+        </div>
+
+        <!-- Pane: MCP Servers Settings -->
+        <div id="settings-mcp" class="settings-pane">
+          <h2 class="settings-pane-title">MCP 伺服器</h2>
+          <p class="settings-section-desc">連接外部工具和資料來源。深入了解。</p>
+          
+          <div class="settings-section" style="margin-top:20px;">
+            <div class="mcp-servers-header" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+              <h3>伺服器</h3>
+              <button class="btn btn-primary btn-sm" id="btn-show-add-mcp-form">+ 新增伺服器</button>
+            </div>
+            
+            <!-- Dynamic Server List -->
+            <div class="mcp-server-cards-list" id="mcp-server-cards-list" style="display:flex; flex-direction:column; gap:12px;">
+              <!-- Rendered servers list -->
+            </div>
+            
+            <!-- Form to add MCP Server -->
+            <div class="add-mcp-form-container" id="add-mcp-form-container" style="display: none; margin-top:20px; padding:15px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: 8px;">
+              <h4>新增 MCP 伺服器</h4>
+              <div class="form-group" style="margin-top:10px;">
+                <label style="font-size:12px; color:var(--text-secondary);">伺服器名稱</label>
+                <input type="text" id="add-mcp-name" placeholder="例如: godot-ai" style="width:100%; background:#000; border:1px solid var(--border-color); padding:8px; border-radius:4px; color:#fff; font-size:13px; margin-top:4px;">
+              </div>
+              <div class="form-group" style="margin-top:10px;">
+                <label style="font-size:12px; color:var(--text-secondary);">執行指令 (Command)</label>
+                <input type="text" id="add-mcp-command" placeholder="例如: node, python, npx" style="width:100%; background:#000; border:1px solid var(--border-color); padding:8px; border-radius:4px; color:#fff; font-size:13px; margin-top:4px;">
+              </div>
+              <div class="form-group" style="margin-top:10px;">
+                <label style="font-size:12px; color:var(--text-secondary);">引數 (Arguments，以空格分隔)</label>
+                <input type="text" id="add-mcp-args" placeholder="例如: c:\path\to\mcp-server.js" style="width:100%; background:#000; border:1px solid var(--border-color); padding:8px; border-radius:4px; color:#fff; font-size:13px; margin-top:4px;">
+              </div>
+              <div style="margin-top:15px; display:flex; gap:10px; justify-content:flex-end;">
+                <button class="btn btn-secondary btn-sm" id="btn-cancel-add-mcp">取消</button>
+                <button class="btn btn-primary btn-sm" id="btn-submit-add-mcp">確認新增</button>
+              </div>
+            </div>
+          </div>
+          
+          <div class="settings-section" style="margin-top:30px;">
+            <h3>來自外掛程式</h3>
+            <div class="plugin-server-item" style="padding:12px; background:rgba(255,255,255,0.01); border:1px solid var(--border-color); border-radius:6px; font-size:13px; color:var(--text-secondary); margin-top:10px;">
+              📦 codex_apps
+            </div>
+          </div>
+        </div>
+
+        <!-- Placeholder integration panes -->
+        <div id="settings-browser" class="settings-pane">
+          <h2 class="settings-pane-title">瀏覽器</h2>
+          <p class="text-muted" style="margin-top:15px;">自訂並配置代理人所使用的 Web 瀏覽器引擎。</p>
+        </div>
+        <div id="settings-computer-use" class="settings-pane">
+          <h2 class="settings-pane-title">Computer use</h2>
+          <p class="text-muted" style="margin-top:15px;">啟用與配置代理人控制滑鼠與鍵盤執行自動化工作 (OSWorld/Computer Use)。</p>
+        </div>
+        <div id="settings-hooks" class="settings-pane">
+          <h2 class="settings-pane-title">掛勾</h2>
+          <p class="text-muted" style="margin-top:15px;">配置工作流在執行前後的 Hooks 與事件觸發器。</p>
+        </div>
+        <div id="settings-git" class="settings-pane">
+          <h2 class="settings-pane-title">Git</h2>
+          <p class="text-muted" style="margin-top:15px;">版本控制配置、自動 Commit 與 PR 提交設定。</p>
+        </div>
+        <div id="settings-env" class="settings-pane">
+          <h2 class="settings-pane-title">環境</h2>
+          <p class="text-muted" style="margin-top:15px;">設定環境變數與沙盒預載入設定。</p>
+        </div>
+        
+        <!-- Pane: Project Settings (Dynamic) -->
+        <div id="project-settings-pane" class="settings-pane">
+          <div class="project-settings-header" style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 20px;">
+            <div style="display:flex; align-items:center; gap:10px;">
+              <h2 class="settings-pane-title" id="proj-settings-title" style="margin-bottom:0;">Project Name</h2>
+              <button class="btn-edit-name" id="btn-edit-proj-name" title="編輯名稱" style="background:none; border:none; cursor:pointer; color:var(--text-secondary); font-size:16px;">✏️</button>
+            </div>
+            <button class="btn btn-danger btn-sm" id="btn-delete-proj">刪除專案</button>
+          </div>
+          <p class="settings-section-desc">Manage project folders, agent settings, and permissions.</p>
+
+          <div class="settings-section">
+            <h3>Folders</h3>
+            <div class="project-folders-list" id="proj-settings-folders" style="display:flex; flex-direction:column; gap:10px; margin-bottom:15px;">
+              <!-- E.g., <div class="proj-folder-item"><span>📁 Agnes-AI</span><button class="btn-remove-folder">×</button></div> -->
+            </div>
+            <button class="btn btn-secondary w-100" id="btn-proj-add-folder" style="height:44px;">+ Add Folder</button>
+          </div>
+
+          <div class="settings-section">
+            <h3>Agent Settings</h3>
+            <div class="settings-card-row" style="display:flex; flex-direction:column; gap:12px;">
+              <div class="settings-card" style="display:flex; justify-content:space-between; align-items:center; padding:15px 20px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px;">
+                <div class="card-left">
+                  <h4 style="font-size:14px; font-weight:600; color:#fff; margin-bottom:4px;">Security Preset</h4>
+                  <p style="font-size:12px; color:var(--text-secondary); line-height:1.4;">Choose a predefined security preset for the agent. This controls terminal auto-execution policy, and file access policy.</p>
+                  <a href="#" style="font-size:11px; color:var(--primary); text-decoration:none; margin-top:4px; display:inline-block;">Learn more about Turbo mode 🛈</a>
+                </div>
+                <select id="proj-security-preset" style="background:var(--bg-input); border:1px solid var(--border-color); border-radius:6px; padding:10px; color:#fff; outline:none; font-size:13px; min-width:140px;">
+                  <option value="turbo">Turbo Mode</option>
+                  <option value="standard">Standard Mode</option>
+                  <option value="strict">Strict Mode</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Agent Behavior</h3>
+            <div class="settings-card-row" style="display:flex; flex-direction:column; gap:12px;">
+              <div class="settings-card" style="display:flex; justify-content:space-between; align-items:center; padding:15px 20px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px;">
+                <div class="card-left">
+                  <h4 style="font-size:14px; font-weight:600; color:#fff; margin-bottom:4px;">Artifact Review Policy</h4>
+                  <p style="font-size:12px; color:var(--text-secondary); line-height:1.4;">Specifies Agent's behavior when asking for review on artifacts, which are documents it creates to enable a richer conversation experience.</p>
+                </div>
+                <select id="proj-review-policy" style="background:var(--bg-input); border:1px solid var(--border-color); border-radius:6px; padding:10px; color:#fff; outline:none; font-size:13px; min-width:140px;">
+                  <option value="always">Always Proceed</option>
+                  <option value="require">Require Review</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section">
+            <h3>Local Permissions</h3>
+            <p class="settings-section-desc">Inherits from <a href="#" style="color:var(--primary); text-decoration:none;">global settings</a>. Local permissions have higher priority. <a href="#" style="color:var(--primary); text-decoration:none;">Learn more</a>.</p>
+            <div class="settings-card" style="display:flex; justify-content:space-between; align-items:center; padding:15px 20px; background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px;">
+              <div class="card-left">
+                <h4 style="font-size:14px; font-weight:600; color:#fff; margin-bottom:4px;">File Access Rules</h4>
+                <p style="font-size:12px; color:var(--text-secondary); line-height:1.4;">Configure allowed and denied paths for file reads and writes.</p>
+              </div>
+              <button class="btn btn-secondary" id="btn-proj-file-rules" style="min-width:80px;">Open</button>
+            </div>
+          </div>
+
+          <!-- Other properties that we support overriding (Work Mode, Shell, Language) -->
+          <div class="settings-section">
+            <h3>Environment Overrides</h3>
+            <div class="general-grid">
+              <div class="general-form-group">
+                <label>工作模式</label>
+                <select id="proj-work-mode">
+                  <option value="none">繼承全域</option>
+                  <option value="programming">用於程式設計</option>
+                  <option value="daily">適合日常工作</option>
+                </select>
+              </div>
+              <div class="general-form-group">
+                <label>整合的終端 Shell</label>
+                <select id="proj-shell">
+                  <option value="none">繼承全域</option>
+                  <option value="PowerShell">PowerShell</option>
+                  <option value="cmd">cmd.exe</option>
+                </select>
+              </div>
+              <div class="general-form-group">
+                <label>語言</label>
+                <select id="proj-lang">
+                  <option value="none">繼承全域</option>
+                  <option value="auto">自動偵測</option>
+                  <option value="zh-TW">繁體中文 (zh-TW)</option>
+                  <option value="en">English (en)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top:20px;">
+            <button class="btn btn-primary" id="btn-save-project-settings-db">儲存專案設定</button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Create Project Modal Overlay -->
+  <div class="modal-overlay" id="create-project-modal">
+    <div class="modal-window">
+      <div class="modal-header">
+        <h3>Create Project</h3>
+        <button class="btn-close-modal" id="btn-close-project-modal">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group" style="margin-bottom:15px;">
+          <label for="project-name-input">Project Name</label>
+          <input type="text" id="project-name-input" placeholder="Enter project name..." style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--border-color); background: #000; color: #fff;">
+        </div>
+        <div class="form-group">
+          <label>Select folder(s)</label>
+          <div class="selected-folders-list" id="create-project-folders-list" style="display:flex; flex-direction:column; gap:6px; margin-bottom:10px;"></div>
+          <button class="btn btn-secondary w-100" id="btn-modal-add-folder" style="border: 1px dashed rgba(255,255,255,0.15); background: rgba(255,255,255,0.02); height: 44px;">+ Add Folder</button>
+        </div>
+      </div>
+      <div class="modal-footer" style="display:flex; justify-content:flex-end; gap:10px; margin-top:20px;">
+        <button class="btn btn-secondary" id="btn-modal-skip-project">Skip</button>
+        <button class="btn btn-primary" id="btn-modal-save-project" style="display:none;">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

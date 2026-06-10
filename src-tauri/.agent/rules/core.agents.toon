@@ -1,0 +1,71 @@
+# Agnes AI — TOON 格式規則檔案
+# Token-Oriented Object Notation
+# 此檔案定義 17 個子代理人的核心行為準則
+
+@struct len:1
+
+@rule core:zero-false-report
+  description: "徹底根除虛假回報"
+  enforcement: "MANDATORY"
+  rule: |
+    執行任何工具或代碼前，必須擷取真實 Exit Code 與 Stderr
+    只有 Exit Code == 0 AND stderr.is_empty() 時才判定成功
+    若 Exit Code != 0，硬性判定為「虛假回報」並啟動自愈循環
+
+@rule core:state-persistence
+  description: "確定性狀態機"
+  enforcement: "MANDATORY"
+  rule: |
+    所有原子任務必須寫入 SQLite (task_status: PENDING/SUCCESS/FAILED)
+    每一輪新對話前，從 SQLite 讀取真實狀態並注入 Context
+    禁止依賴對話 history 記憶進度
+
+@rule core:locale-calibration
+  description: "作業系統層級語系校準"
+  enforcement: "MANDATORY"
+  rule: |
+    Windows 執行前注入 chcp 65001
+    Unix/macOS 強制寫入 LANG=zh_TW.UTF-8 LC_ALL=zh_TW.UTF-8
+    禁止盲目假設系統預設編碼
+
+@rule core:key-isolation
+  description: "金鑰本機持久化"
+  enforcement: "MANDATORY"
+  rule: |
+    API Key 必須存在 config.local.toml（已在 .gitignore 中）
+    禁止在 .rs 原始碼中硬編碼任何 sk- 開頭的字串
+    提交前自動掃描原始碼中的 sk-[a-zA-Z0-9]{10,}
+
+@rule workflow:delta-only
+  description: "增量代碼更新"
+  enforcement: "RECOMMENDED"
+  rule: |
+    修正階段禁止輸出未變更的整段程式碼
+    一律採用 Git Diff 增量格式
+    未激活的代理人保持休眠狀態
+
+@rule output:path-gating
+  description: "檔案路徑分流"
+  enforcement: "MANDATORY"
+  rule: |
+    .md 文件 → Docs/
+    .toon 規則 → .agent/rules/
+    原始碼 → src/
+    禁止 Magic Numbers，全部抽離至 Config 結構
+
+@rule security:command-injection
+  description: "命令注入防禦"
+  enforcement: "MANDATORY"
+  rule: |
+    所有參數必須通過 sanitize_arg 檢查
+    拒絕 ; | & $ ` ( ) { } < > 等元字元
+    禁止路徑穿越 (..)
+    執行時使用參數向量化，禁止 shell 字串拼接
+
+@rule agent:one-vote-veto
+  description: "一票否決制"
+  enforcement: "MANDATORY"
+  rule: |
+    17 個代理人中只要任何一個 REJECT，任務立即中斷
+    不可跳過、不可忽略、不可 soft-fail
+    拒絕詳情必須包含具體錯誤行號與邏輯鏈

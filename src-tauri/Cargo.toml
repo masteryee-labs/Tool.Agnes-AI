@@ -1,0 +1,42 @@
+[package]
+name = "agnes-ai"
+version = "0.3.0"
+description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
+authors = ["Agnes Team"]
+edition = "2021"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+eframe = { version = "0.31", default-features = true, features = ["default_fonts"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["svg"] }
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+toml = "0.8"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+walkdir = "2"
+rfd = "0.14"
+regex = "1.10"
+sha2 = "0.10"
+tempfile = "3.10"
+chrono = { version = "0.4", features = ["serde"] }
+
+[[bin]]
+name = "agnes-ai"
+path = "src/main.rs"
+required-features = []
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[patch.'https://github.com/emilk/egui']
+# egui = { git = "https://github.com/emilk/egui", branch = "master" }
