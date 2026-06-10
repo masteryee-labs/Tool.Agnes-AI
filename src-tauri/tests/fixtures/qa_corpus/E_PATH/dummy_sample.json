@@ -1,0 +1,11 @@
+{
+  "expected_verdict": "REJECTED",
+  "failure_code": "G4",
+  "tool_calls": [
+    {
+      "content": "some content",
+      "name": "write_file",
+      "path": "../outside.txt"
+    }
+  ]
+}

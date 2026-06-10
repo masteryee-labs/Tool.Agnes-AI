@@ -1,0 +1,20 @@
+# 建置產物
+/target/
+/src-tauri/target/
+/render_test/target/
+
+# 金鑰與本機組態（鋼鐵規範：金鑰永不入庫）
+config.local.toml
+.env
+
+# Runtime 狀態與日誌
+*.db
+*.db-journal
+*.log
+*.ppm
+memory_tags/
+
+# 實驗與暫存
+/scratch/
+/render_test/
+/mock_project/
