@@ -124,6 +124,36 @@ pub fn sliding_window_chunk(text: &str, chunk_size_tokens: usize, overlap_lines:
     chunks
 }
 
+/// Parse a JSON string array from model output, tolerating ```json fences.
+fn parse_json_string_array(text: &str) -> Vec<String> {
+    serde_json::from_str(text)
+        .or_else(|_| {
+            let cleaned = text.trim_start_matches("```json")
+                .trim_start_matches("```")
+                .trim_end_matches("```")
+                .trim();
+            serde_json::from_str(cleaned)
+        })
+        .unwrap_or_default()
+}
+
+/// Deterministic distillation audit (TokenOverlapAuditor, 0 token).
+/// Rejects empty output and "distillation" that grew instead of shrinking.
+pub fn audit_distillation(original: &str, distilled: &str) -> Result<(), String> {
+    if distilled.trim().is_empty() {
+        return Err("[REJECT: TokenOverlapAuditor | 蒸餾結果為空]".to_string());
+    }
+    let orig_tokens = estimate_tokens(original);
+    let dist_tokens = estimate_tokens(distilled);
+    if dist_tokens >= orig_tokens {
+        return Err(format!(
+            "[REJECT: TokenOverlapAuditor | 蒸餾後 token ({}) 未小於原文 ({})]",
+            dist_tokens, orig_tokens
+        ));
+    }
+    Ok(())
+}
+
 /// Dynamic RAG Funnel retrieval system.
 pub struct MemoryManager {
     pub workspace_path: PathBuf,
@@ -226,6 +256,46 @@ impl MemoryManager {
         Ok(file_path)
     }
 
+    /// Single LLM call helper shared by funnel stages and distillation agents.
+    async fn llm_call(
+        client: &reqwest::Client,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        user_msg: &str,
+        temperature: f64,
+    ) -> Result<String, String> {
+        let payload = serde_json::json!({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg}
+            ],
+            "temperature": temperature,
+        });
+
+        let res = client.post(api_url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("API request failed: {}", e))?;
+
+        if !res.status().is_success() {
+            return Err(format!("API returned error status: {}", res.status()));
+        }
+
+        let res_json: serde_json::Value = res.json().await
+            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+        Ok(res_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string())
+    }
+
     /// Stage 1: Find Tag Folders (Domains).
     /// Calls the model to select matching directories under memory_tags/
     pub async fn stage1_find_tags(
@@ -233,6 +303,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         api_url: &str,
         api_key: &str,
+        model: &str,
         user_prompt: &str,
     ) -> Result<Vec<String>, String> {
         if !self.memory_tags_path.exists() {
@@ -257,43 +328,9 @@ impl MemoryManager {
         let system_prompt = "你是一個領域/標籤篩選專家。請根據使用者的提示詞，從給定的標籤資料夾列表中選出最相關的標籤。\n必須僅回傳一個 JSON 格式的字串陣列，例如: [\"git\", \"rust\"]，不要有任何 Markdown 標記（如 ```json）或額外解釋。如果沒有相關標籤，回傳 []。";
         let user_msg = format!("使用者提示詞: {}\n標籤資料夾列表: {:?}", user_prompt, tag_folders);
 
-        let payload = serde_json::json!({
-            "model": "agnes-2.0-flash",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg}
-            ],
-            "temperature": 0.1,
-        });
+        let text = Self::llm_call(client, api_url, api_key, model, system_prompt, &user_msg, 0.1).await?;
 
-        let res = client.post(api_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("API request failed: {}", e))?;
-
-        if !res.status().is_success() {
-            return Err(format!("API returned error status: {}", res.status()));
-        }
-
-        let res_json: serde_json::Value = res.json().await
-            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
-        
-        let text = res_json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim();
-
-        let parsed: Vec<String> = serde_json::from_str(text)
-            .or_else(|_| {
-                let cleaned = text.trim_start_matches("```json")
-                    .trim_start_matches("```")
-                    .trim_end_matches("```")
-                    .trim();
-                serde_json::from_str(cleaned)
-            })
-            .unwrap_or_default();
+        let parsed: Vec<String> = parse_json_string_array(&text);
 
         let matched: Vec<String> = parsed.into_iter()
             .filter(|t| tag_folders.contains(t))
@@ -309,6 +346,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         api_url: &str,
         api_key: &str,
+        model: &str,
         user_prompt: &str,
         selected_tags: &[String],
     ) -> Result<Vec<PathBuf>, String> {
@@ -339,43 +377,9 @@ impl MemoryManager {
         let system_prompt = "你是一個檔案篩選專家。請根據使用者的提示詞，從給定的 Markdown 檔案列表中選出最可能包含有用歷史記憶的檔案。\n必須僅回傳一個 JSON 格式的字串陣列，例如: [\"file1.md\", \"file2.md\"]，不要有任何 Markdown 標記（如 ```json）或額外解釋。如果沒有相關檔案，回傳 []。";
         let user_msg = format!("使用者提示詞: {}\n檔案列表: {:?}", user_prompt, file_names);
 
-        let payload = serde_json::json!({
-            "model": "agnes-2.0-flash",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg}
-            ],
-            "temperature": 0.1,
-        });
+        let text = Self::llm_call(client, api_url, api_key, model, system_prompt, &user_msg, 0.1).await?;
 
-        let res = client.post(api_url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| format!("API request failed: {}", e))?;
-
-        if !res.status().is_success() {
-            return Err(format!("API returned error status: {}", res.status()));
-        }
-
-        let res_json: serde_json::Value = res.json().await
-            .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
-        
-        let text = res_json["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim();
-
-        let parsed: Vec<String> = serde_json::from_str(text)
-            .or_else(|_| {
-                let cleaned = text.trim_start_matches("```json")
-                    .trim_start_matches("```")
-                    .trim_end_matches("```")
-                    .trim();
-                serde_json::from_str(cleaned)
-            })
-            .unwrap_or_default();
+        let parsed: Vec<String> = parse_json_string_array(&text);
 
         let mut matched_paths = Vec::new();
         for name in parsed {
@@ -388,6 +392,56 @@ impl MemoryManager {
         }
 
         Ok(matched_paths)
+    }
+
+    /// Group 1 distillation pipeline (Memory Distillation & Hallucination Defense):
+    ///   1. sliding_window_chunk 切塊（重疊區保留邏輯銜接）
+    ///   2. ContextDistillerAlpha / Beta 並行壓縮前後半段（flash 級模型）
+    ///   3. DistillationIntegrator 整合並消弭斷層
+    ///   4. audit_distillation 確定性審查（0 token，一票否決）
+    ///
+    /// 不持有 SQLite 連線（rusqlite Connection 非 Sync，不能跨 await）；
+    /// 歸檔由呼叫端在 await 完成後以 save_memory 執行。
+    pub async fn distill_text(
+        &self,
+        client: &reqwest::Client,
+        api_url: &str,
+        api_key: &str,
+        model: &str,
+        conversation_text: &str,
+        cfg: &MemoryConfig,
+    ) -> Result<String, String> {
+        const DISTILLER_PROMPT: &str = "你是脈絡蒸餾專家。將輸入文本壓縮為高密度的 Markdown 記憶摘要。\n硬性要求：保留所有關鍵參數、數值、檔案路徑、決策與結論；刪除寒暄、重複與過程性對話；禁止新增原文沒有的內容；輸出必須明顯短於原文。";
+        const INTEGRATOR_PROMPT: &str = "你是蒸餾邏輯整合官。將前半段與後半段的蒸餾摘要重組為單一連貫的 Markdown 記憶檔。\n硬性要求：消弭兩段交界的斷層與重複（兩段共享重疊區）；保留全部關鍵參數；禁止新增原文沒有的內容；輸出極簡精煉。";
+
+        let chunks = sliding_window_chunk(conversation_text, cfg.chunk_size, cfg.overlap_lines);
+        if chunks.is_empty() {
+            return Err("蒸餾輸入為空".to_string());
+        }
+
+        let mid = usize::div_ceil(chunks.len(), 2);
+        let front: String = chunks[..mid].iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+        let back: String = chunks[mid..].iter().map(|c| c.text.as_str()).collect::<Vec<_>>().join("\n");
+
+        // ContextDistillerAlpha 與 Beta 並行執行
+        let distilled = if back.trim().is_empty() {
+            Self::llm_call(client, api_url, api_key, model, DISTILLER_PROMPT, &front, 0.1).await?
+        } else {
+            let (alpha, beta) = tokio::join!(
+                Self::llm_call(client, api_url, api_key, model, DISTILLER_PROMPT, &front, 0.1),
+                Self::llm_call(client, api_url, api_key, model, DISTILLER_PROMPT, &back, 0.1),
+            );
+            let alpha = alpha?;
+            let beta = beta?;
+            // DistillationIntegrator 重組
+            let merged_input = format!("[前半段蒸餾]\n{}\n\n[後半段蒸餾]\n{}", alpha, beta);
+            Self::llm_call(client, api_url, api_key, model, INTEGRATOR_PROMPT, &merged_input, 0.1).await?
+        };
+
+        // TokenOverlapAuditor 確定性審查（一票否決）
+        audit_distillation(conversation_text, &distilled)?;
+
+        Ok(distilled)
     }
 
     /// Stage 3: Inject File Contents.

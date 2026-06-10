@@ -212,9 +212,9 @@ impl AgentLoop {
             }
 
             if !bypassed {
-                if let Ok(tags) = memory_manager.stage1_find_tags(&client, &api_url, api_key, last_user_prompt).await {
+                if let Ok(tags) = memory_manager.stage1_find_tags(&client, &api_url, api_key, &model, last_user_prompt).await {
                     if !tags.is_empty() {
-                        if let Ok(files) = memory_manager.stage2_find_files(&client, &api_url, api_key, last_user_prompt, &tags).await {
+                        if let Ok(files) = memory_manager.stage2_find_files(&client, &api_url, api_key, &model, last_user_prompt, &tags).await {
                             rag_context = memory_manager.stage3_inject_contents(&files);
                         }
                     }
@@ -321,6 +321,41 @@ impl AgentLoop {
                     for tool in &tool_calls {
                         let result = self.execute_tool(tool, mcp_manager).await;
                         execution_results.push(result);
+                    }
+                }
+
+                // 終端蒸餾歸檔：對話 token 增量觸及閾值時，喚醒第一組蒸餾管線
+                let conversation_text: String = messages.iter()
+                    .filter_map(|m| m["content"].as_str())
+                    .chain(std::iter::once(response_text.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if crate::memory::estimate_tokens(&conversation_text)
+                    >= self.config.memory.distill_trigger_delta
+                {
+                    // 蒸餾 await 階段不持有 SQLite 連線（Connection 非 Sync）
+                    match memory_manager.distill_text(
+                        &client, &api_url, api_key, &model,
+                        &conversation_text, &self.config.memory,
+                    ).await {
+                        Ok(distilled) => {
+                            let slug = format!("conv_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
+                            match crate::open_connection(db_path).map_err(|e| e.to_string())
+                                .and_then(|conn| memory_manager.save_memory(
+                                    &conn, "conversations", &slug, &distilled, &self.config.memory,
+                                ))
+                            {
+                                Ok(path) => execution_results.push(
+                                    format!("[MEMORY] 對話已蒸餾歸檔: {}", path.display()),
+                                ),
+                                Err(e) => execution_results.push(
+                                    format!("[MEMORY] 蒸餾歸檔失敗（不影響任務結果）: {}", e),
+                                ),
+                            }
+                        }
+                        Err(e) => execution_results.push(
+                            format!("[MEMORY] 蒸餾失敗（不影響任務結果）: {}", e),
+                        ),
                     }
                 }
 

@@ -196,6 +196,123 @@ impl AgnesApp {
         Self { app_state, ui_state }
     }
 
+    /// 側欄：對話歷史列表（點擊載入、🗑 刪除）。
+    fn render_history_list(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) {
+        ui.label(
+            egui::RichText::new(t("conversation_history", lang))
+                .size(11.0).color(TEXT_SECONDARY).strong(),
+        );
+        ui.add_space(4.0);
+
+        let convs = st.conversations.clone();
+        let mut to_delete: Option<String> = None;
+
+        egui::ScrollArea::vertical().id_salt("history_scroll").show(ui, |ui| {
+            for (cid, title, created) in &convs {
+                ui.horizontal(|ui| {
+                    let selected = st.active_conversation_id.as_deref() == Some(cid.as_str());
+                    let label = if title.trim().is_empty() { "(無標題)" } else { title.as_str() };
+                    if ui.selectable_label(selected, label).on_hover_text(created).clicked() {
+                        if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                            if let Ok(msgs) = app_lib::get_messages_for_conversation(&conn, cid) {
+                                st.active_messages = msgs.into_iter()
+                                    .map(|m| ChatMessage { role: m.role, content: m.content })
+                                    .collect();
+                                st.active_conversation_id = Some(cid.clone());
+                            }
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("🗑").clicked() {
+                            to_delete = Some(cid.clone());
+                        }
+                    });
+                });
+            }
+            if convs.is_empty() {
+                ui.label(egui::RichText::new("—").size(10.0).color(TEXT_MUTED));
+            }
+        });
+
+        if let Some(cid) = to_delete {
+            if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                let _ = app_lib::delete_conversation(&conn, &cid);
+                if st.active_conversation_id.as_deref() == Some(cid.as_str()) {
+                    st.active_conversation_id = None;
+                    st.active_messages.clear();
+                }
+                if let Ok(convs) = app_lib::get_conversations(&conn) {
+                    st.conversations = convs;
+                }
+            }
+        }
+    }
+
+    /// 側欄：專案與多資料夾選取列表。
+    fn render_projects_list(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) {
+        ui.label(egui::RichText::new(t("projects", lang)).size(11.0).color(TEXT_SECONDARY).strong());
+        ui.add_space(4.0);
+
+        let selected_idx = st.selected_project_idx;
+        let projects_cloned = st.projects.clone();
+
+        for (idx, p) in projects_cloned.iter().enumerate() {
+            let is_selected = selected_idx == Some(idx);
+            if ui.selectable_label(is_selected, &p.name).clicked() {
+                st.selected_project_idx = Some(idx);
+                st.selected_paths.clear();
+                for path in &p.paths {
+                    st.selected_paths.insert(path.clone());
+                }
+            }
+
+            if is_selected {
+                ui.indent("folder_indent", |ui| {
+                    for path in &p.paths {
+                        let mut checked = st.selected_paths.contains(path);
+                        let short = std::path::Path::new(path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| path.clone());
+                        if ui.checkbox(&mut checked, &short)
+                            .on_hover_text(path)
+                            .changed()
+                        {
+                            if checked {
+                                st.selected_paths.insert(path.clone());
+                            } else {
+                                st.selected_paths.remove(path);
+                            }
+                        }
+                    }
+
+                    if ui.button(t("add_folder", lang)).clicked() {
+                        if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
+                            let path_str = folder_path.to_string_lossy().to_string();
+                            if let Some(proj) = st.projects.get_mut(idx) {
+                                proj.paths.push(path_str.clone());
+                            }
+                            st.selected_paths.insert(path_str);
+                            if let Some(proj) = st.projects.get(idx) {
+                                if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                                    let json = serde_json::to_string(&proj.paths).unwrap_or_default();
+                                    let _ = app_lib::update_project_folders(&conn, &proj.id, &json);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        let folder_count = st.selected_paths.len();
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(t_fmt("selected_folders", lang, folder_count))
+                .size(10.0).color(TEXT_MUTED),
+        );
+    }
+
     fn handle_send(&self, ctx: &egui::Context) {
         let (_prompt, conversation_id, config, workspace_path) = {
             let mut st = self.ui_state.lock().unwrap();
@@ -429,70 +546,13 @@ impl eframe::App for AgnesApp {
                 ui.separator();
                 ui.add_space(6.0);
 
-                // Project list
-                ui.label(egui::RichText::new(t("projects", &lang)).size(11.0).color(TEXT_SECONDARY).strong());
-                ui.add_space(4.0);
-
                 let mut st = self.ui_state.lock().unwrap();
 
-                let selected_idx = st.selected_project_idx;
-                let projects_cloned = st.projects.clone();
-
-                for (idx, p) in projects_cloned.iter().enumerate() {
-                    let is_selected = selected_idx == Some(idx);
-                    if ui.selectable_label(is_selected, &p.name).clicked() {
-                        st.selected_project_idx = Some(idx);
-                        st.selected_paths.clear();
-                        for path in &p.paths {
-                            st.selected_paths.insert(path.clone());
-                        }
-                    }
-
-                    if is_selected {
-                        ui.indent("folder_indent", |ui| {
-                            for path in &p.paths {
-                                let mut checked = st.selected_paths.contains(path);
-                                let short = std::path::Path::new(path)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| path.clone());
-                                if ui.checkbox(&mut checked, &short)
-                                    .on_hover_text(path)
-                                    .changed()
-                                {
-                                    if checked {
-                                        st.selected_paths.insert(path.clone());
-                                    } else {
-                                        st.selected_paths.remove(path);
-                                    }
-                                }
-                            }
-
-                            if ui.button(t("add_folder", &lang)).clicked() {
-                                if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
-                                    let path_str = folder_path.to_string_lossy().to_string();
-                                    if let Some(proj) = st.projects.get_mut(idx) {
-                                        proj.paths.push(path_str.clone());
-                                    }
-                                    st.selected_paths.insert(path_str);
-                                    if let Some(proj) = st.projects.get(idx) {
-                                        if let Ok(conn) = Connection::open(&self.app_state.db_path) {
-                                            let json = serde_json::to_string(&proj.paths).unwrap_or_default();
-                                            let _ = app_lib::update_project_folders(&conn, &proj.id, &json);
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
+                if st.sidebar_tab == 1 {
+                    self.render_history_list(ui, &mut st, &lang);
+                } else {
+                    self.render_projects_list(ui, &mut st, &lang);
                 }
-
-                let folder_count = st.selected_paths.len();
-                ui.add_space(6.0);
-                ui.label(
-                    egui::RichText::new(t_fmt("selected_folders", &lang, folder_count))
-                        .size(10.0).color(TEXT_MUTED),
-                );
 
                 ui.add_space(10.0);
                 ui.separator();
