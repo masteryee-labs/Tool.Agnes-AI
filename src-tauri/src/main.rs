@@ -24,32 +24,44 @@ const ACCENT_YELLOW:egui::Color32 = egui::Color32::from_rgb(255, 220, 60);
 
 // ─── i18n ────────────────────────────────────────────────────────────────────
 
+// 注意：值內不得內嵌 icon——icon 由呼叫端統一前綴，避免重複疊加。
 const TRANSLATIONS: &[(&str, (&str, &str))] = &[
-    ("new_conversation",    ("＋ 新增對話",            "+ New Conversation")),
-    ("conversation_history",("🕒 對話歷史",            "🕒 History")),
-    ("projects",            ("📁 專案",                "📁 Projects")),
-    ("settings",            ("⚙ 設定",                "⚙ Settings")),
-    ("ask_placeholder",     ("問什麼都可以，@ 提及，/ 指令", "Ask anything, @ to mention, / for actions")),
-    ("add_folder",          ("+ 新增資料夾",           "+ Add Folder")),
-    ("agent_status",        ("🤖 22 代理人狀態",       "🤖 22-Agent Status")),
-    ("global_warning",      ("🌐 全域模式已啟用 — 所有操作需逐項確認", "🌐 Global mode active — all operations require confirmation")),
-    ("pending_approval",    ("⚠ 待確認",              "⚠ Pending")),
-    ("work_mode_project",   ("📁 專案模式",            "📁 Project Mode")),
-    ("work_mode_global",    ("🌍 全域模式",            "🌍 Global Mode")),
+    ("new_conversation",    ("新增對話",               "New Conversation")),
+    ("conversation_history",("對話歷史",               "Conversation History")),
+    ("projects",            ("專案",                   "Projects")),
+    ("settings",            ("設定",                   "Settings")),
+    ("ask_placeholder",     ("什麼都能做，@ 提及，/ 指令", "Ask anything, @ to mention, / for actions")),
+    ("add_folder",          ("新增資料夾",             "Add Folder")),
+    ("agent_status",        ("22 代理人狀態",          "22-Agent Status")),
+    ("global_warning",      ("全域模式已啟用 — 所有操作需逐項確認", "Global mode active — all operations require confirmation")),
+    ("pending_approval",    ("待確認",                 "Pending Approval")),
+    ("work_mode_project",   ("專案模式",               "Project Mode")),
+    ("work_mode_global",    ("全域模式",               "Global Mode")),
     ("general",             ("一般",                   "General")),
     ("permissions",         ("權限",                   "Permissions")),
     ("security",            ("安全",                   "Security")),
     ("save",                ("儲存",                   "Save")),
-    ("terminal_shell",      ("整合終端 Shell",         "Terminal Shell")),
+    ("terminal_shell",      ("整合的終端 Shell",       "Terminal Shell")),
     ("auto_review",         ("自動審查",               "Auto Review")),
-    ("full_access",         ("完整存取",               "Full Access")),
+    ("full_access",         ("完整存取權",             "Full Access")),
     ("token_budget",        ("Token 預算",             "Token Budget")),
-    ("welcome_title",       ("歡迎使用 Agnes AI",      "Welcome to Agnes AI")),
-    ("welcome_body",        ("在下方輸入指令開始工作。支援多資料夾專案、22 道安全驗證、全域確認模式。",
-                             "Type a command below to start. Supports multi-folder projects, 22-gate validation, and global confirmation mode.")),
+    ("welcome_question",    ("我們該在 {} 中建立什麼？", "What should we build in {}?")),
     ("selected_folders",    ("{} 個資料夾已選取",       "{} folder(s) selected")),
     ("language",            ("語言",                   "Language")),
+    ("menu_file",           ("檔案",                   "File")),
+    ("menu_view",           ("檢視",                   "View")),
+    ("menu_window",         ("視窗",                   "Window")),
+    ("clear_chat",          ("清除當前對話",           "Clear Chat")),
+    ("add_project_folder",  ("新增專案資料夾…",        "Add Project Folder…")),
+    ("untitled",            ("(無標題)",               "(Untitled)")),
+    ("abort",               ("中止",                   "Abort")),
+    ("running_hint",        ("正在執行任務中，請稍候…", "Executing task, please wait…")),
+    ("local_work",          ("本機作業",               "Local")),
 ];
+
+fn t_with(key: &str, lang: &str, arg: &str) -> String {
+    t(key, lang).replace("{}", arg)
+}
 
 fn t(key: &str, lang: &str) -> String {
     for &(k, (zh, en)) in TRANSLATIONS {
@@ -130,8 +142,41 @@ struct AgnesApp {
     ui_state:  Arc<Mutex<UiState>>,
 }
 
+/// 載入作業系統 CJK 字型（egui default_fonts 不含中文字形，缺此步全部渲染為方框亂碼）。
+fn load_cjk_fonts(ctx: &egui::Context) {
+    let candidates: &[&str] = &[
+        // Windows：微軟正黑體（zh-TW 優先）→ 微軟雅黑 → 細明體
+        "C:\\Windows\\Fonts\\msjh.ttc",
+        "C:\\Windows\\Fonts\\msjhl.ttc",
+        "C:\\Windows\\Fonts\\msyh.ttc",
+        "C:\\Windows\\Fonts\\mingliu.ttc",
+        // macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        // Linux
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    ];
+
+    let mut fonts = egui::FontDefinitions::default();
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "cjk".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            // CJK 作為 fallback 接在內建拉丁字型之後，emoji 字型保持原序
+            fonts.families.entry(egui::FontFamily::Proportional).or_default().push("cjk".to_owned());
+            fonts.families.entry(egui::FontFamily::Monospace).or_default().push("cjk".to_owned());
+            break;
+        }
+    }
+    ctx.set_fonts(fonts);
+}
+
 impl AgnesApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        load_cjk_fonts(&cc.egui_ctx);
+
         let db_path = app_lib::resolve_db_path();
 
         let config = match Config::load() {
@@ -211,7 +256,8 @@ impl AgnesApp {
             for (cid, title, created) in &convs {
                 ui.horizontal(|ui| {
                     let selected = st.active_conversation_id.as_deref() == Some(cid.as_str());
-                    let label = if title.trim().is_empty() { "(無標題)" } else { title.as_str() };
+                    let untitled = t("untitled", lang);
+                    let label = if title.trim().is_empty() { untitled.as_str() } else { title.as_str() };
                     if ui.selectable_label(selected, label).on_hover_text(created).clicked() {
                         if let Ok(conn) = Connection::open(&self.app_state.db_path) {
                             if let Ok(msgs) = app_lib::get_messages_for_conversation(&conn, cid) {
@@ -311,6 +357,156 @@ impl AgnesApp {
             egui::RichText::new(t_fmt("selected_folders", lang, folder_count))
                 .size(10.0).color(TEXT_MUTED),
         );
+    }
+
+    /// 輸入卡（Codex 風格）：多行輸入 + 工具列（＋選單、模式、模型、送出/中止）。
+    /// 回傳 true 表示使用者觸發送出（呼叫端負責 drop 鎖後執行 handle_send）。
+    fn render_input_card(&self, ui: &mut egui::Ui, st: &mut UiState, is_running: bool, lang: &str) -> bool {
+        let mut send_requested = false;
+        let model_name = self.app_state.config.lock().unwrap().api.model.clone();
+
+        egui::Frame::default()
+            .fill(BG_SECONDARY)
+            .stroke(egui::Stroke::new(1.0, BORDER))
+            .corner_radius(12)
+            .inner_margin(12.0)
+            .show(ui, |ui| {
+                // 多行輸入區
+                let text_edit = egui::TextEdit::multiline(&mut st.chat_input)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(2)
+                    .hint_text(t("ask_placeholder", lang))
+                    .interactive(!is_running)
+                    .frame(false);
+                let response = ui.add(text_edit);
+
+                ui.add_space(8.0);
+
+                // 工具列
+                ui.horizontal(|ui| {
+                    // ＋ 選單
+                    ui.menu_button(egui::RichText::new("＋").size(17.0).strong(), |ui| {
+                        if ui.button(format!("🗑 {}", t("clear_chat", lang))).clicked() {
+                            st.active_messages.clear();
+                            st.active_conversation_id = None;
+                            ui.close_menu();
+                            ui.ctx().request_repaint();
+                        }
+                        if ui.button(format!("📂 {}", t("add_project_folder", lang))).clicked() {
+                            ui.close_menu();
+                            ui.ctx().request_repaint();
+                            if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
+                                let path_str = folder_path.to_string_lossy().to_string();
+                                if let Some(idx) = st.selected_project_idx {
+                                    let mut updated_paths = None;
+                                    let mut project_id = None;
+                                    if let Some(proj) = st.projects.get(idx) {
+                                        let mut paths = proj.paths.clone();
+                                        paths.push(path_str.clone());
+                                        updated_paths = Some(paths);
+                                        project_id = Some(proj.id.clone());
+                                    }
+                                    if let (Some(paths), Some(pid)) = (updated_paths, project_id) {
+                                        st.selected_paths.insert(path_str.clone());
+                                        if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                                            let json = serde_json::to_string(&paths).unwrap_or_default();
+                                            let _ = app_lib::update_project_folders(&conn, &pid, &json);
+                                        }
+                                        if let Some(proj) = st.projects.get_mut(idx) {
+                                            proj.paths = paths;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    // 專案選擇（Codex 底欄風格）
+                    let project_label = st.selected_project_idx
+                        .and_then(|i| st.projects.get(i))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| t("projects", lang));
+                    ui.menu_button(
+                        egui::RichText::new(format!("📁 {} ⏷", project_label)).size(13.0).color(TEXT_SECONDARY),
+                        |ui| {
+                            let projects = st.projects.clone();
+                            for (idx, p) in projects.iter().enumerate() {
+                                if ui.selectable_label(st.selected_project_idx == Some(idx), &p.name).clicked() {
+                                    st.selected_project_idx = Some(idx);
+                                    st.selected_paths.clear();
+                                    for path in &p.paths {
+                                        st.selected_paths.insert(path.clone());
+                                    }
+                                    ui.close_menu();
+                                }
+                            }
+                        },
+                    );
+
+                    // 模式徽章（專案=本機作業 / 全域）
+                    let (mode_icon, mode_key, mode_color) = if st.work_mode == "global" {
+                        ("🌍", "work_mode_global", ACCENT_ORANGE)
+                    } else {
+                        ("💻", "local_work", TEXT_SECONDARY)
+                    };
+                    if ui.add_enabled(
+                        !is_running,
+                        egui::Button::new(
+                            egui::RichText::new(format!("{} {} ⏷", mode_icon, t(mode_key, lang)))
+                                .color(mode_color).size(13.0),
+                        ).frame(false),
+                    ).clicked() {
+                        st.work_mode = if st.work_mode == "global" { "project".into() } else { "global".into() };
+                        let mut cfg = self.app_state.config.lock().unwrap().clone();
+                        cfg.general.project_mode = st.work_mode.clone();
+                        let _ = cfg.save();
+                        *self.app_state.config.lock().unwrap() = cfg;
+                    }
+
+                    // 右對齊：送出 / 中止 + 模型名
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if is_running {
+                            let abort_btn = egui::Button::new(
+                                egui::RichText::new(format!("■ {}", t("abort", lang)))
+                                    .color(TEXT_PRIMARY).strong().size(14.0),
+                            )
+                            .fill(ACCENT_RED)
+                            .corner_radius(14)
+                            .min_size(egui::Vec2::new(64.0, 30.0));
+                            if ui.add(abort_btn).clicked() {
+                                if let Ok(mut s) = self.app_state.agent_state.try_lock() {
+                                    *s = AgentExecutionState::Idle;
+                                }
+                                ui.ctx().request_repaint();
+                            }
+                        } else {
+                            let send_btn = egui::Button::new(
+                                egui::RichText::new("↑").color(TEXT_PRIMARY).strong().size(16.0),
+                            )
+                            .fill(ACCENT_BLUE)
+                            .corner_radius(15)
+                            .min_size(egui::Vec2::new(30.0, 30.0));
+                            let clicked = ui.add(send_btn).clicked();
+
+                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let shift_pressed = ui.input(|i| i.modifiers.shift);
+                            if clicked || (enter_pressed && !shift_pressed && response.has_focus()) {
+                                if st.chat_input.ends_with('\n') {
+                                    st.chat_input.pop();
+                                }
+                                let trimmed = st.chat_input.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    st.chat_input = trimmed;
+                                    send_requested = true;
+                                }
+                            }
+                        }
+                        ui.label(egui::RichText::new(&model_name).color(TEXT_MUTED).size(12.0));
+                    });
+                });
+            });
+
+        send_requested
     }
 
     fn handle_send(&self, ctx: &egui::Context) {
@@ -510,11 +706,8 @@ impl eframe::App for AgnesApp {
                     );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("✕").clicked() {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        for item in &["Window", "View", "File"] {
-                            let _ = ui.button(egui::RichText::new(*item).size(12.0));
+                        for key in &["menu_window", "menu_view", "menu_file"] {
+                            let _ = ui.button(egui::RichText::new(t(key, &lang)).size(12.0));
                         }
                     });
                 });
@@ -526,27 +719,36 @@ impl eframe::App for AgnesApp {
             .min_width(180.0)
             .max_width(320.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let tabs = [("💬", "new_conversation"), ("🕒", "conversation_history")];
-                    let cur_tab = self.ui_state.lock().unwrap().sidebar_tab;
-                    for (i, (icon, key)) in tabs.iter().enumerate() {
-                        let label = format!("{} {}", icon, t(key, &lang));
-                        if ui.selectable_label(cur_tab == i, label).clicked() {
-                            let mut st = self.ui_state.lock().unwrap();
-                            st.sidebar_tab = i;
-                            if i == 0 {
-                                st.active_conversation_id = None;
-                                st.active_messages.clear();
-                            }
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(6.0);
-
                 let mut st = self.ui_state.lock().unwrap();
+                ui.add_space(8.0);
+
+                // ＋ 新增對話：主要動作按鈕（Antigravity 風格，全寬、強調色）
+                let new_conv_btn = egui::Button::new(
+                    egui::RichText::new(format!("＋  {}", t("new_conversation", &lang)))
+                        .size(14.0).color(TEXT_PRIMARY).strong(),
+                )
+                .fill(egui::Color32::from_rgb(40, 60, 100))
+                .corner_radius(8)
+                .min_size(egui::Vec2::new(ui.available_width(), 36.0));
+                if ui.add(new_conv_btn).clicked() {
+                    st.sidebar_tab = 0;
+                    st.active_conversation_id = None;
+                    st.active_messages.clear();
+                }
+
+                ui.add_space(10.0);
+
+                // 🕒 對話歷史
+                if ui.selectable_label(
+                    st.sidebar_tab == 1,
+                    egui::RichText::new(format!("🕒  {}", t("conversation_history", &lang))).size(13.0),
+                ).clicked() {
+                    st.sidebar_tab = if st.sidebar_tab == 1 { 0 } else { 1 };
+                }
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
 
                 if st.sidebar_tab == 1 {
                     self.render_history_list(ui, &mut st, &lang);
@@ -554,28 +756,34 @@ impl eframe::App for AgnesApp {
                     self.render_projects_list(ui, &mut st, &lang);
                 }
 
-                ui.add_space(10.0);
-                ui.separator();
-                ui.add_space(4.0);
+                // 底部釘住：⚙ 設定 + 模式切換
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                    ui.add_space(8.0);
+                    let mode_icon  = if st.work_mode == "global" { "🌍" } else { "📁" };
+                    let mode_text  = if st.work_mode == "global" { t("work_mode_global", &lang) } else { t("work_mode_project", &lang) };
+                    let mode_color = if st.work_mode == "global" { ACCENT_ORANGE } else { ACCENT_BLUE };
+                    if ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("{}  {}", mode_icon, mode_text))
+                                .color(mode_color).size(13.0),
+                        ).frame(false)
+                    ).on_hover_text(t("global_warning", &lang)).clicked() {
+                        st.work_mode = if st.work_mode == "global" { "project".into() } else { "global".into() };
+                        let mut cfg = self.app_state.config.lock().unwrap().clone();
+                        cfg.general.project_mode = st.work_mode.clone();
+                        let _ = cfg.save();
+                        *self.app_state.config.lock().unwrap() = cfg;
+                    }
 
-                if ui.button(format!("⚙ {}", t("settings", &lang))).clicked() {
-                    st.settings_open = true;
-                }
-
-                ui.add_space(6.0);
-                let mode_text  = if st.work_mode == "global" { t("work_mode_global", &lang) } else { t("work_mode_project", &lang) };
-                let mode_color = if st.work_mode == "global" { ACCENT_ORANGE } else { ACCENT_BLUE };
-                if ui.add(
-                    egui::Button::new(egui::RichText::new(&mode_text).color(mode_color).size(13.0))
-                ).on_hover_text(
-                    if st.work_mode == "global" { t("global_warning", &lang) } else { "Switch to Global (Hermes) mode".into() }
-                ).clicked() {
-                    st.work_mode = if st.work_mode == "global" { "project".into() } else { "global".into() };
-                    let mut cfg = self.app_state.config.lock().unwrap().clone();
-                    cfg.general.project_mode = st.work_mode.clone();
-                    let _ = cfg.save();
-                    *self.app_state.config.lock().unwrap() = cfg;
-                }
+                    if ui.add(
+                        egui::Button::new(
+                            egui::RichText::new(format!("⚙  {}", t("settings", &lang))).size(13.0),
+                        ).frame(false)
+                    ).clicked() {
+                        st.settings_open = true;
+                    }
+                    ui.separator();
+                });
             });
 
         // ── Right Agent Panel ─────────────────────────────────────────────────
@@ -592,7 +800,7 @@ impl eframe::App for AgnesApp {
                     egui::Stroke::new(1.0, BORDER),
                 );
 
-                ui.label(egui::RichText::new(t("agent_status", &lang)).size(13.0).color(TEXT_PRIMARY).strong());
+                ui.label(egui::RichText::new(format!("🤖 {}", t("agent_status", &lang))).size(13.0).color(TEXT_PRIMARY).strong());
                 ui.add_space(6.0);
 
                 let groups: &[(&str, &[&str])] = &[
@@ -711,30 +919,43 @@ impl eframe::App for AgnesApp {
                 ui.add_space(4.0);
             }
 
-            // Message area
+            // ── Codex 風格空狀態：置中大標題提問 + 置中輸入卡 ──
             let chat_is_empty = st.active_messages.is_empty();
-            let avail_height  = ui.available_height() - 50.0;
+            if chat_is_empty && !is_running {
+                let avail = ui.available_height();
+                ui.add_space((avail * 0.30).max(40.0));
+                let project_name = st.selected_project_idx
+                    .and_then(|i| st.projects.get(i))
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| "Agnes AI".to_string());
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(t_with("welcome_question", &lang, &project_name))
+                            .size(28.0).color(TEXT_PRIMARY).strong(),
+                    );
+                });
+                ui.add_space(28.0);
+                let mut send = false;
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(760.0);
+                    send = self.render_input_card(ui, &mut st, is_running, &lang);
+                });
+                if send {
+                    drop(st);
+                    self.handle_send(ctx);
+                }
+                return;
+            }
+
+            // ── 對話進行中：訊息流 + 底部輸入卡 ──
+            let avail_height = ui.available_height() - 130.0;
 
             egui::ScrollArea::vertical()
                 .max_height(avail_height)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap); // Enable word wrapping globally in scroll area
-                    if chat_is_empty {
-                        // Welcome / empty state
-                        ui.add_space(avail_height * 0.25);
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new(t("welcome_title", &lang))
-                                    .size(24.0).color(TEXT_PRIMARY).strong(),
-                            );
-                            ui.add_space(8.0);
-                            ui.label(
-                                egui::RichText::new(t("welcome_body", &lang))
-                                    .size(15.0).color(TEXT_SECONDARY),
-                            );
-                        });
-                    } else {
+                    {
                         for msg in &st.active_messages {
                             let is_user = msg.role == "user";
                             let is_tool = msg.role == "tool";
@@ -801,140 +1022,28 @@ impl eframe::App for AgnesApp {
                             .show(ui, |ui| {
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("🤖 Agnes AI").color(ACCENT_BLUE).strong().size(16.0));
+                                    ui.label(egui::RichText::new("Agnes AI").color(ACCENT_BLUE).strong().size(16.0));
                                     ui.add(egui::Spinner::new());
-                                    ui.label(egui::RichText::new(if lang == "zh" { "正在執行任務中，請稍候..." } else { "Executing task, please wait..." })
+                                    ui.label(egui::RichText::new(t("running_hint", &lang))
                                         .color(TEXT_SECONDARY).size(16.0));
                                 });
                             });
                     }
                 });
 
-            // Input box pinned to bottom - Codex / Antigravity 2.0 style
+            // 底部釘住輸入卡（Codex / Antigravity 2.0 風格）
+            let mut send = false;
             ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                egui::Frame::default()
-                    .fill(BG_SECONDARY)
-                    .stroke(egui::Stroke::new(1.0, BORDER))
-                    .corner_radius(8)
-                    .inner_margin(12.0)
-                    .show(ui, |ui| {
-                        // 1. Multiline Text Area
-                        let text_edit = egui::TextEdit::multiline(&mut st.chat_input)
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(2)
-                            .hint_text(t("ask_placeholder", &lang))
-                            .interactive(!is_running) // Disable text area input if running
-                            .frame(false); // Clean frame-less look inside the card
-                        
-                        let response = ui.add(text_edit);
-                        
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(6.0);
-                        
-                        // 2. Toolbar below text area
-                        ui.horizontal(|ui| {
-                            // Left options menu
-                            ui.menu_button(egui::RichText::new("＋").size(17.0).strong(), |ui| {
-                                if ui.button(if lang == "zh" { "🗑 清除當前對話" } else { "🗑 Clear Chat" }).clicked() {
-                                    st.active_messages.clear();
-                                    st.active_conversation_id = None;
-                                    ui.close_menu();
-                                    ui.ctx().request_repaint();
-                                }
-                                if ui.button(if lang == "zh" { "📂 新增專案資料夾..." } else { "📂 Add Project Folder..." }).clicked() {
-                                    ui.close_menu();
-                                    ui.ctx().request_repaint();
-                                    if let Some(folder_path) = rfd::FileDialog::new().pick_folder() {
-                                        let path_str = folder_path.to_string_lossy().to_string();
-                                        if let Some(idx) = st.selected_project_idx {
-                                            let mut updated_paths = None;
-                                            let mut project_id = None;
-                                            if let Some(proj) = st.projects.get(idx) {
-                                                let mut paths = proj.paths.clone();
-                                                paths.push(path_str.clone());
-                                                updated_paths = Some(paths);
-                                                project_id = Some(proj.id.clone());
-                                            }
-                                            if let (Some(paths), Some(pid)) = (updated_paths, project_id) {
-                                                st.selected_paths.insert(path_str.clone());
-                                                if let Ok(conn) = Connection::open(&self.app_state.db_path) {
-                                                    let json = serde_json::to_string(&paths).unwrap_or_default();
-                                                    let _ = app_lib::update_project_folders(&conn, &pid, &json);
-                                                }
-                                                if let Some(proj) = st.projects.get_mut(idx) {
-                                                    proj.paths = paths;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                            
-                            // Permissions / Security Level indicator
-                            let perm_text = if st.work_mode == "global" { "🌍 全域模式" } else { "📁 專案模式" };
-                            let perm_color = if st.work_mode == "global" { ACCENT_ORANGE } else { ACCENT_BLUE };
-                            if ui.add_enabled(!is_running, egui::Button::new(egui::RichText::new(perm_text).color(perm_color).size(15.0))).clicked() {
-                                st.work_mode = if st.work_mode == "global" { "project".into() } else { "global".into() };
-                                let mut cfg = self.app_state.config.lock().unwrap().clone();
-                                cfg.general.project_mode = st.work_mode.clone();
-                                let _ = cfg.save();
-                                *self.app_state.config.lock().unwrap() = cfg;
-                            }
-                            
-                            // Model selection
-                            ui.label(egui::RichText::new(" agnes-2.0-flash ").color(TEXT_SECONDARY).size(15.0));
-                            
-                            // Right aligned items: send button / Abort button
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if is_running {
-                                    // Render red Abort button
-                                    let abort_btn = egui::Button::new(
-                                        egui::RichText::new("■ 中止").color(TEXT_PRIMARY).strong().size(15.0)
-                                    )
-                                    .fill(ACCENT_RED)
-                                    .corner_radius(12)
-                                    .min_size(egui::Vec2::new(64.0, 32.0));
-                                    
-                                    if ui.add(abort_btn).clicked() {
-                                        if let Ok(mut s) = self.app_state.agent_state.try_lock() {
-                                            *s = AgentExecutionState::Idle;
-                                        }
-                                        ui.ctx().request_repaint();
-                                    }
-                                } else {
-                                    // Render standard send button
-                                    let send_btn = egui::Button::new(
-                                        egui::RichText::new("▲").color(TEXT_PRIMARY).strong().size(15.0)
-                                    )
-                                    .fill(ACCENT_BLUE)
-                                    .corner_radius(12)
-                                    .min_size(egui::Vec2::new(32.0, 32.0));
-                                    
-                                    let clicked = ui.add(send_btn).clicked();
-                                    
-                                    // Send trigger logic: Enter without shift when typing in the text edit or button click
-                                    let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                                    let shift_pressed = ui.input(|i| i.modifiers.shift);
-                                    let send_triggered = clicked || (enter_pressed && !shift_pressed && response.has_focus());
-                                    
-                                    if send_triggered {
-                                        if st.chat_input.ends_with('\n') {
-                                            st.chat_input.pop();
-                                        }
-                                        let trimmed = st.chat_input.trim().to_string();
-                                        if !trimmed.is_empty() {
-                                            st.chat_input = trimmed;
-                                            drop(st);
-                                            self.handle_send(ctx);
-                                        }
-                                    }
-                                }
-                            });
-                        });
-                    });
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(860.0);
+                    send = self.render_input_card(ui, &mut st, is_running, &lang);
+                });
             });
+            if send {
+                drop(st);
+                self.handle_send(ctx);
+            }
         });
 
         // ── Settings Modal ────────────────────────────────────────────────────
