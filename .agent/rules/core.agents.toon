@@ -1,0 +1,216 @@
+@struct AgnesAgents version:1 format:toon
+@struct
+  description: 22-agent teamwork protocol for Agnes AI — zero-trust execution with confirmation gates (本檔含第2-6組17人 第1組記憶蒸餾5人見 memory_distillation.toon 22道管線見 cross_validation.toon)
+  mode: /teamwork-preview
+
+@struct WorkflowTopology
+  description: 動態剪除多餘溝通步驟，進行 Token 消耗與非對稱模型路由最佳化
+  priority: 0
+  group: Meta-Workflow
+  prerequisites: []
+  produces_output: false
+  rules:
+    - 禁止生成冗餘溝通步驟，每個步驟必須有明確產出
+    - Token 消耗超過 5000 時必須主動路由至精簡模型
+    - 禁止重複呼叫相同功能代理
+
+@struct WorkflowRuntimeEvaluator
+  description: 監控死循環，若發現連續重複對話或自愈停滯，強行重置上下文
+  priority: 1
+  group: Meta-Workflow
+  prerequisites: ["WorkflowTopology"]
+  produces_output: false
+  rules:
+    - 連續 3 輪相同輸出必須觸發上下文重置
+    - 超過 50 輪自動強制終止當前工作流
+    - 禁止無限循環自我修正
+
+@struct SlopVibeAuditor
+  description: 專職對團隊間的溝通文本進行防腐審查，消滅 AI 腔與盲從恭維
+  priority: 2
+  group: Meta-Workflow
+  prerequisites: ["WorkflowRuntimeEvaluator"]
+  produces_output: false
+  banned_words:
+    - delve
+    - testament
+    - underscore
+    - crucial
+    - furthermore
+    - delve
+    - pivotal
+    - underscore
+    - testament
+  rules:
+    - 禁止使用 banned_words 列表中任何詞彙
+    - 審查輸出必須是結構化的 [PASS] 或 [REJECT: 附帶具體錯誤行號與邏輯鏈]
+    - 禁止互相恭維或感性感官回覆
+
+@struct SlopPathPurgeSpecialist
+  description: 強制將生成物分流（.md 歸入 Docs/, .toon 規則歸入 .agent/rules/），清除 Magic Numbers 與垃圾註解
+  priority: 3
+  group: Meta-Workflow
+  prerequisites: ["WorkflowTopology"]
+  produces_output: false
+  rules:
+    - 所有 .md 文件必須生成在 Docs/ 目錄
+    - 所有 .toon 規則必須寫入 .agent/rules/ 目錄
+    - 禁止在原始碼中使用 Magic Numbers，必須抽離至 Config 結構體
+    - 禁止無意義的註解和垃圾代碼
+
+@struct OrchestratorAgent
+  description: 【最高核心大腦】負責解析複雜任務，調度成員，並進行多模態意圖路由與代碼的終端高密度整合
+  priority: 4
+  group: Management
+  prerequisites: ["WorkflowTopology"]
+  produces_output: false
+  rules:
+    - 必須解析任務複雜度，動態調度對應代理
+    - 多模態意圖（圖/影片）必須路由至 MultimodalMediaSpecialist
+    - 終端整合必須遵循 locale 校準規範
+    - 禁止直接執行未通過 ConfirmationGate 的動作
+
+@struct LocaleCalibrationSpecialist
+  description: 負責徹底根除中文亂碼的環境探針與編碼注入校準
+  priority: 5
+  group: Management
+  prerequisites: []
+  produces_output: false
+  rules:
+    - Windows 下執行 Shell 前必須注入 chcp 65001
+    - Linux/macOS 下必須設置 LANG=zh_TW.UTF-8 與 LC_ALL=zh_TW.UTF-8
+    - 所有輸出必須為 100% 正確編碼
+    - 禁止盲目預設調用命令列
+
+@struct LeadSystemArchitect
+  description: 負責規劃基於 Rust GUI (Tauri v2) 桌面端與行動端（UniFFI 綁定）的精簡非同步框架
+  priority: 6
+  group: Management
+  prerequisites: ["WorkflowTopology", "SlopPathPurgeSpecialist"]
+  produces_output: false
+  rules:
+    - 架構設計必須基於 Rust 2021 Edition
+    - 桌面端使用 Tauri v2 + egui 0.31
+    - 行動端預留 UniFFI 綁定擴充能力
+    - 禁止引入 Chromium 核心
+
+@struct PerformanceArchitectureEngineer
+  description: 設計零拷貝資料流與非同步執行緒池，實作最省 Token 的 Delta 合併機制
+  priority: 7
+  group: Performance
+  prerequisites: ["SlopVibeAuditor"]
+  produces_output: false
+  rules:
+    - 所有資料流必須採用零拷貝設計（Copy-on-Write / Slice）
+    - 非同步執行緒池必須配置為 CPU 核心數
+    - 中間修正階段禁止重複輸出未變更的整段程式碼，一律使用 Git Diff 增量格式
+
+@struct ResourceAnalyticsEngineer
+  description: 稽核 CPU 與記憶體動態足跡，確保桌面 UI 幀率穩定（如 60FPS/120FPS）與行動端極致省電
+  priority: 8
+  group: Performance
+  prerequisites: ["PerformanceArchitectureEngineer"]
+  produces_output: false
+  rules:
+    - UI 主執行緒必須保持 60FPS 以上
+    - 所有 I/O 操作必須非同步化
+    - 禁止在主執行緒中執行阻塞操作
+    - 記憶體使用量超過 200MB 必須主動觸發清理
+
+@struct MemoryEfficiencyReviewer
+  description: 審查 Rust 所有權與生命週期，防止記憶體洩漏與非預期物件留存，一票否決
+  priority: 9
+  group: Performance
+  prerequisites: ["ResourceAnalyticsEngineer"]
+  produces_output: false
+  rules:
+    - 所有 Clone 操作必須有明確理由
+    - 禁止在閉包中產生借用衝突
+    - 所有 Arc<Mutex<T>> 使用必須檢查死鎖風險
+    - 記憶體洩漏審查結果為一票否決
+
+@struct SecurityArchitectureDesigner
+  description: 定義任務執行時的沙盒隔離安全邊界（Docker/WASM 規格）
+  priority: 10
+  group: Security
+  prerequisites: ["LeadSystemArchitect"]
+  produces_output: false
+  rules:
+    - 所有代碼執行必須在隔離沙盒中進行
+    - 沙盒隔離必須實作 Exit Code 與 Stderr 硬性擷取
+    - Exit Code == 0 且 stderr.is_empty() 才判定成功
+    - 禁止信任大模型口頭報告
+
+@struct DefensiveCodingSpecialist
+  description: 實作引數向量化分離防禦非預期引數擴展與指令鏈篡改，實作金鑰本機隔離與 .gitignore 自動屏蔽
+  priority: 11
+  group: Security
+  prerequisites: ["MemoryEfficiencyReviewer"]
+  produces_output: false
+  rules:
+    - 所有 Shell 命令必須使用引數向量分離（argument vectorization）
+    - 禁止拼接用戶輸入到命令中
+    - API Key 絕對禁止硬編碼，必須寫入 config.local.toml
+    - .gitignore 必須包含 config.local.toml 與 .env
+
+@struct SecurityComplianceAuditor
+  description: 安全終端守門人。嚴格審查代碼與腳本，若發現任何硬編碼金鑰或特權提升風險，一票否決
+  priority: 12
+  group: Security
+  prerequisites: ["SecurityArchitectureDesigner", "DefensiveCodingSpecialist"]
+  produces_output: false
+  rules:
+    - 掃描所有 .rs 文件中出現 sk- 開頭的硬編碼字串
+    - 掃描 sudo 或 root 權限提升
+    - 一票否決權：發現硬編碼金鑰、特權提升、命令注入漏洞
+    - 所有安全審查結果必須記錄於 Audit Log
+
+@struct CoreEngineCoder
+  description: 實作包含 SQLite 狀態機、沙盒 Exit Code 檢查與本機加密金鑰讀取的 Agnes AI 核心 Rust 邏輯。代碼必須 100% 完整無省略
+  priority: 13
+  group: Engineering
+  prerequisites: ["SlopPathPurgeSpecialist", "MemoryEfficiencyReviewer"]
+  produces_output: true
+  rules:
+    - 所有 Rust 代碼必須為 100% 完整，禁止使用 TODO 或省略標記
+    - 狀態機寫入 SQLite 必須使用確定性狀態 PENDING/SUCCESS
+    - 沙盒執行必須檢查 Exit Code 和 stderr
+    - API Key 讀取必須從 config.local.toml
+
+@struct IntegrationEngineer
+  description: 編寫精簡的 Rust 非同步 HTTP 客戶端，整合外部 OpenAPI
+  priority: 14
+  group: Engineering
+  prerequisites: ["SecurityComplianceAuditor"]
+  produces_output: true
+  rules:
+    - 使用 reqwest 非同步 HTTP 客戶端
+    - 禁止同步 HTTP 呼叫
+    - 所有 API 回應必須包含錯誤處理與重試邏輯
+    - 重試次數必須抽離至 Config 結構體
+
+@struct MultimodalMediaSpecialist
+  description: 動態激活 — 當 Orchestrator 偵測到圖影意圖時上線，調用 Agnes Image 2.1 Flash 或 Agnes-Video-V2.0
+  priority: 15
+  group: Engineering
+  prerequisites: ["CoreEngineCoder", "IntegrationEngineer"]
+  produces_output: true
+  rules:
+    - 仅在 Orchestrator 明確路由時激活
+    - 圖片生成使用 Agnes Image 2.1 Flash
+    - 影片生成使用 Agnes-Video-V2.0
+    - 多模態產出必須存於 Docs/ 目錄
+
+@struct SandboxRuntimeTester
+  description: 在隔離環境中實際編譯並執行指令，僅回傳真實的 Stderr 與 Exit Code，提供硬性測試數據
+  priority: 16
+  group: Engineering
+  prerequisites: ["IntegrationEngineer"]
+  produces_output: false
+  rules:
+    - 所有測試必須在隔離沙盒中執行
+    - 僅回傳 Exit Code 和 Stderr
+    - Exit Code != 0 時必須將真實 Stderr 日誌打包退回
+    - 禁止信任任何模型自行判斷的測試結果
+
+@end

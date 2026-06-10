@@ -1,0 +1,103 @@
+@struct MemoryDistillation version:1 format:toon
+@struct
+  description: 第一組 記憶蒸餾與防幻覺組 5 代理人 + 無限上下文記憶機制規則
+  mode: all
+  doc: Docs/02_MEMORY_SYSTEM.md
+
+@struct MemoryConfig
+  description: 記憶系統硬性參數 全部由 Config.memory 載入 禁止散落代碼
+  md_token_cap: 2000
+  context_high_watermark: 800000
+  chunk_size: 100000
+  overlap_lines: 50
+  distill_trigger_delta: 50000
+  local_hit_threshold: 0.8
+
+@struct StorageLayout
+  description: 記憶檔儲存佈局
+  rules:
+    - 路徑嚴格限制為 memory_tags/[標籤資料夾]/[UUID前8碼]_[kebab-case摘要].md
+    - 單檔 token 超過 md_token_cap 必須自動分裂為新 UUID 檔
+    - 記憶檔禁止記錄任務進度狀態 進度只進 SQLite
+    - token 計數使用本地 estimate_tokens 禁止呼叫 API 計數
+
+@struct SlidingWindowChunking
+  description: 重疊滑動視窗分塊 超過水位禁止截斷
+  rules:
+    - 上下文超過 context_high_watermark 必須啟動切片 絕對禁止直接截斷
+    - 相鄰 chunk 強制重疊 上下各 overlap_lines 行
+    - chunk[i] 尾部重疊區必須與 chunk[i+1] 頭部重疊區位元組一致
+
+@struct FunnelRAG
+  description: 三階段漏斗式動態記憶檢索 任務前置強制排程
+  stages:
+    - Stage 0 [本地預過濾 0token]: SQLite FTS5 倒排索引粗篩 命中分數 >= local_hit_threshold 時跳過 Stage 1
+    - Stage 1 [找領域 flash]: Prompt + 標籤資料夾名稱清單 → 關聯標籤清單
+    - Stage 2 [找檔案 flash]: Prompt + 關聯標籤內全部 .md 檔名 → 精準檔案清單
+    - Stage 3 [注內容 主力]: Prompt + 篩選 .md 內容 → 最終 Context
+  rules:
+    - 三階段全部記入 audit_logs 可重放
+    - 注入內容總量受 Config.memory.context_budget 上限約束
+
+@struct ContextDistillerAlpha
+  description: 滑動視窗前半段 chunks 高密度壓縮
+  priority: 17
+  group: MemoryDistillation
+  prerequisites: []
+  produces_output: true
+  model_tier: flash
+  rules:
+    - 僅在對話 token 增量 >= distill_trigger_delta 時激活
+    - 與 ContextDistillerBeta 並行執行
+    - 壓縮結果必須保留全部關鍵參數 數值 路徑 決策
+
+@struct ContextDistillerBeta
+  description: 滑動視窗後半段 chunks 並行壓縮
+  priority: 18
+  group: MemoryDistillation
+  prerequisites: []
+  produces_output: true
+  model_tier: flash
+  rules:
+    - 激活條件與並行規則同 ContextDistillerAlpha
+    - 頭部重疊區必須與 Alpha 尾部重疊區對齊消化
+
+@struct DistillationIntegrator
+  description: 總和重組 Alpha 與 Beta 結果 消弭斷層 轉換為極簡 .md 記憶檔
+  priority: 19
+  group: MemoryDistillation
+  prerequisites: ["ContextDistillerAlpha", "ContextDistillerBeta"]
+  produces_output: true
+  model_tier: flash
+  rules:
+    - 必須靠 overlap 區驗證邏輯銜接 斷層即退回
+    - 產出 .md 必須符合 StorageLayout 命名與路徑規範
+
+@struct FactHallucinationAuditor
+  description: 第一道審查 蒸餾文本與原始文本交叉比對
+  priority: 20
+  group: MemoryDistillation
+  prerequisites: ["DistillationIntegrator"]
+  produces_output: false
+  model_tier: flash
+  veto: true
+  rules:
+    - 發現無中生有內容 直接 [REJECT] 退回重啟蒸餾
+    - 發現關鍵參數遺失 直接 [REJECT] 退回重啟蒸餾
+    - 審查輸出強制 [PASS] 或 [REJECT: 具體段落+邏輯鏈]
+
+@struct TokenOverlapAuditor
+  description: 第二道審查 純 Rust 確定性檢查 0 token
+  priority: 21
+  group: MemoryDistillation
+  prerequisites: ["FactHallucinationAuditor"]
+  produces_output: false
+  model_tier: none
+  veto: true
+  rules:
+    - estimate_tokens(.md) > md_token_cap 一票否決
+    - 標籤資料夾分類錯誤 一票否決
+    - overlap 區未被完整消化 一票否決
+    - 本審查禁止任何 LLM 呼叫
+
+@end

@@ -1,0 +1,61 @@
+@struct ConfirmationGate version:1 format:toon
+@struct
+  description: Zero-trust confirmation gate policy — no action executes without user approval
+  mode: all
+
+@struct SafetyGates
+  description: Four-level safety gate chain for execution
+  rules:
+    - Gate 1 [DestructiveCheck]: 掃描命令是否包含 rm -rf、format、del、Remove-Item 等破壞性操作
+    - Gate 2 [PathScopeVerification]: 全域模式下必須驗證執行路徑在允許列表中
+    - Gate 3 [SubagentAudit]: 審查 17 代理人分工是否正確路由
+    - Gate 4 [ExecutionLog]: 記錄所有已批准/拒絕的動作於 Audit Log
+
+@struct AllowedPaths
+  description: Allowed execution path roots for global mode
+  paths:
+    - C:\Users\MasterYee\Documents\Program
+    - C:\Users\MasterYee\Documents
+    - C:\Users\MasterYee
+    - C:\Program Files
+    - C:\ProgramData
+  blocked_patterns:
+    - C:\Windows
+    - C:\System32
+    - C:\Program Files (x86)\Windows
+
+@struct RiskLevels
+  description: Action risk classification for approval prioritization
+  Low:
+    description: 讀取文件、列出目錄、搜索文件
+    auto_approve: false
+  Medium:
+    description: 修改現有文件、創建新文件、重命名
+    auto_approve: false
+  High:
+    description: 編譯 Rust 專案、執行測試、修改系統配置
+    auto_approve: false
+  Critical:
+    description: 刪除文件/目錄、執行 rm -rf、格式化、修改 .gitignore
+    auto_approve: false
+
+@struct Workflow
+  description: Confirmation gate workflow — sequential execution chain
+  steps:
+    - Step 1: Orchestrator 產生 PendingAction 列表
+    - Step 2: PendingActions 以 ConfirmationGate UI 展示於右側面板
+    - Step 3: 使用者逐項 Approve / Reject
+    - Step 4: 僅 Approve 的動作進入沙盒執行
+    - Step 5: SandboxRuntimeTester 回傳 Exit Code + Stderr
+    - Step 6: 執行結果記錄於 Audit Log
+    - Step 7: 若 Exit Code != 0，自動觸發 Delta-Only 自愈重寫
+
+@struct LocaleSafety
+  description: Locale calibration must happen before any Shell execution
+  rules:
+    - Windows: 注入 chcp 65001 切換至 UTF-8
+    - Linux/macOS: 設置 LANG=zh_TW.UTF-8 與 LC_ALL=zh_TW.UTF-8
+    - 所有命令執行前必須校準語系
+    - 禁止無校準直接調用 Shell
+
+@end

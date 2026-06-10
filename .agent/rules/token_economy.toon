@@ -1,0 +1,69 @@
+@struct TokenEconomy version:1 format:toon
+@struct
+  description: Token 極致節約規則 邏輯優先於 LLM 能用 Rust 解決的判斷一個 token 都不花
+  mode: all
+  doc: Docs/04_TOKEN_ECONOMY.md
+
+@struct BudgetConfig
+  description: 預算參數 全部由 Config.api 載入
+  session_budget: 1000000
+  warn_watermark_pct: 80
+  lock_watermark_pct: 100
+  single_call_cap: 200000
+
+@struct LogicBeforeLlm
+  description: 確定性判斷禁用 LLM 清單
+  rules:
+    - 指令安全檢查 用 sandbox.rs 規則引擎 禁止問模型
+    - 成功判定 用 Exit Code + Stderr 禁止信口頭報告
+    - token 計數 用本地 estimate_tokens 禁止 API 計數
+    - 進度回憶 用 SQLite SELECT 禁止重讀對話
+    - 記憶檔分裂 用行級切分計數器
+    - 記憶檢索 Stage 0 用 FTS5 倒排索引預過濾
+
+@struct ModelRouting
+  description: 非對稱模型路由 路由表進 Config.api.model_routing
+  routes:
+    - 標籤分類 檔名篩選 語意審查 蒸餾壓縮: flash
+    - 代碼生成 複雜推理 終端簽核: primary
+    - 同失敗碼三次後的升級重試: premium 僅一次
+
+@struct PromptCacheAlignment
+  description: 提示前綴快取對齊
+  rules:
+    - request 結構固定 靜態 system 前綴 + 慢變狀態注入 + 快變內容置尾
+    - 靜態段位元組級穩定 禁止嵌時間戳與隨機序
+    - SQLite 狀態注入段僅在狀態實際變更時改動
+
+@struct LazyActivation
+  description: 休眠代理 未路由零成本
+  rules:
+    - 未被 Orchestrator 路由的代理 不建 task 不呼叫 API 不進 prompt
+    - 蒸餾組僅在 token 增量觸及 distill_trigger_delta 時激活
+    - MultimodalMediaSpecialist 僅媒體意圖激活
+
+@struct DeltaOnly
+  description: 增量更新強制
+  rules:
+    - 修正階段一律 unified diff 格式 未變更代碼禁止重複輸出
+    - Rust 端 apply_patch 驗證可套用 套不上即 E_SCHEMA REJECT
+    - REJECT 回饋只含失敗碼+出錯行+修補指令
+
+@struct TokenLedger
+  description: 記帳與檢核
+  rules:
+    - 每次 API 呼叫前本地估算 超過 single_call_cap 先走蒸餾縮減 不送出
+    - response usage 寫入 SQLite token_ledger 表
+    - 水位 warn_watermark_pct 告警 lock_watermark_pct 鎖定僅確定性操作可續
+    - 每 Phase 檢視每 token 完成任務數 必須單調上升 只看數字不看氛圍
+
+@struct AntiPatterns
+  description: 審查時直接 REJECT 的反模式
+  rules:
+    - 為確認而呼叫 API 確認用 Exit Code 與 SQLite
+    - 整檔塞 prompt 只為改一行
+    - 讓模型複述任務狀態
+    - 語意審查用主力檔模型
+    - 重試時重送相同 prompt 未過 repair_table
+
+@end

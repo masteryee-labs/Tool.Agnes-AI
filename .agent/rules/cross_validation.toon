@@ -1,0 +1,56 @@
+@struct CrossValidation version:1 format:toon
+@struct
+  description: 寫檔前 22 道交叉驗證管線 任一 REJECT 即退回 qa_validation 自修正迴圈
+  mode: all
+  doc: Docs/06_AGENT_TEAM.md
+  cost: 17 道 Rust 0-token + 4 道 flash + 1 道 primary
+
+@struct StageA
+  description: 靜態確定性 並行執行 全部 0 token
+  gates:
+    - G1 [WorkflowTopology]: 步驟數與 token 預算檢查
+    - G2 [WorkflowRuntimeEvaluator]: 死循環計數 3 輪重複 / 50 輪上限
+    - G3 [SlopVibeAuditor]: banned_words 正則掃描
+    - G4 [SlopPathPurgeSpecialist]: .md 歸 Docs/ .toon 歸 .agent/rules/ Magic Number 掃描
+    - G5 [LocaleCalibrationSpecialist]: 語系環境變數已注入
+    - G6 [LeadSystemArchitect]: Cargo.toml 禁 Chromium/WebView 系依賴
+    - G10 [SecurityArchitectureDesigner]: 沙盒邊界組態檢查
+    - G11 [DefensiveCodingSpecialist]: 引數向量化掃描 + .gitignore 完整性
+    - G12 [SecurityComplianceAuditor]: 金鑰 sk- 掃描 + 升權掃描 veto:true
+    - G13 [CoreEngineCoder]: 禁 TODO unimplemented! 省略標記
+    - G14 [IntegrationEngineer]: 禁 blocking HTTP 重試組態必須存在
+    - G15 [MultimodalMediaSpecialist]: 媒體產物路徑 非媒體任務記 SKIP
+
+@struct StageB
+  description: 編譯期確定性 順序執行 0 token
+  gates:
+    - G7 [PerformanceArchitectureEngineer]: diff 可套用性 套用至暫存工作樹
+    - G9 [MemoryEfficiencyReviewer]: cargo clippy -D warnings veto:true
+    - G8 [ResourceAnalyticsEngineer]: 主執行緒阻塞呼叫掃描
+    - G16 [SandboxRuntimeTester]: cargo check + cargo test 真實 Exit Code veto:true
+
+@struct StageC
+  description: 語意審查 flash 級
+  gates:
+    - G17 [FactHallucinationAuditor]: 變更摘要 vs 實際 diff 交叉比對 聲稱與實作不符即 REJECT veto:true
+    - G18 [TokenOverlapAuditor]: 記憶檔 token 上限/標籤/重疊區 0 token veto:true
+    - G19 [ContextDistillerAlpha]: 大 diff 前半段蒸餾 與 G20 並行 小 diff 記 SKIP
+    - G20 [ContextDistillerBeta]: 大 diff 後半段蒸餾 小 diff 記 SKIP
+    - G21 [DistillationIntegrator]: 蒸餾整合為記憶 .md 小 diff 記 SKIP
+
+@struct StageD
+  description: 終端簽核
+  gates:
+    - G22 [OrchestratorAgent]: 終端整合審查 primary 模型 [PASS] 才寫入磁碟
+
+@struct ExecutionRules
+  description: 管線執行紀律
+  rules:
+    - 每道 gate 回傳 Pass / Reject{code,line,chain} / Skip{reason} 三態
+    - 22 道結果全部寫入 audit_logs 含 gate 編號 結果 耗時 token 成本
+    - StageA 並行 總延遲目標一秒內
+    - REJECT 訊息強制結構化 [REJECT: G編號 | 檔案:行號 | 原因] 禁止感性語句
+    - 任一 veto:true gate REJECT 立即中止後續 gate 退回自修正迴圈
+    - SKIP 必須附 reason 且記入 audit_logs 禁止靜默跳過
+
+@end
