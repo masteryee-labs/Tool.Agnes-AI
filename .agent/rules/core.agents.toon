@@ -37,10 +37,13 @@
     - underscore
     - crucial
     - furthermore
-    - delve
     - pivotal
-    - underscore
-    - testament
+    - moreover
+    - robust
+    - realm
+    - tapestry
+    - embark
+    - intricate
   rules:
     - 禁止使用 banned_words 列表中任何詞彙
     - 審查輸出必須是結構化的 [PASS] 或 [REJECT: 附帶具體錯誤行號與邏輯鏈]
