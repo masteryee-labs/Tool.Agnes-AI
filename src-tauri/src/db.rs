@@ -156,6 +156,12 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             content
         );
 
+        CREATE TABLE IF NOT EXISTS distill_markers (
+            conv_hash TEXT PRIMARY KEY,
+            tokens INTEGER NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_execution_logs_task
             ON execution_logs(task_id);
 
@@ -176,6 +182,33 @@ pub fn open_connection(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
     init_db(&conn)?;
     Ok(conn)
+}
+
+// ─── 蒸餾水位記號（防止超過閾值後每輪重複蒸餾燒 token）──────────────────────
+
+/// 取得該對話上次蒸餾時的 token 水位（無記錄回傳 0）。
+pub fn get_distill_marker(conn: &Connection, conv_hash: &str) -> Result<i64> {
+    let result = conn.query_row(
+        "SELECT tokens FROM distill_markers WHERE conv_hash = ?1",
+        params![conv_hash],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(e) => Err(e),
+    }
+}
+
+/// 寫入/更新該對話的蒸餾水位。
+pub fn set_distill_marker(conn: &Connection, conv_hash: &str, tokens: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO distill_markers (conv_hash, tokens, updated_at)
+         VALUES (?1, ?2, CURRENT_TIMESTAMP)
+         ON CONFLICT(conv_hash) DO UPDATE SET tokens = ?2, updated_at = CURRENT_TIMESTAMP",
+        params![conv_hash, tokens],
+    )?;
+    Ok(())
 }
 
 // ─── Task CRUD ────────────────────────────────────────────────────────────────

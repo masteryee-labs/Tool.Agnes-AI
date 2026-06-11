@@ -922,3 +922,18 @@ fn test_audit_distillation_passes_compression() {
     let distilled = "timeout=30；路徑 C:/work/app；決策：方案 B";
     assert!(crate::memory::audit_distillation(&original, distilled).is_ok());
 }
+
+// ─── 引號感知指令切割 ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_split_command_line_quotes() {
+    let parts = crate::split_command_line("cargo test --manifest-path \"C:/Program Files/app/Cargo.toml\"");
+    assert_eq!(parts, vec!["cargo", "test", "--manifest-path", "C:/Program Files/app/Cargo.toml"]);
+}
+
+#[test]
+fn test_split_command_line_plain_and_single_quotes() {
+    assert_eq!(crate::split_command_line("echo hello world"), vec!["echo", "hello", "world"]);
+    assert_eq!(crate::split_command_line("grep 'two words' file.txt"), vec!["grep", "two words", "file.txt"]);
+    assert!(crate::split_command_line("   ").is_empty());
+}

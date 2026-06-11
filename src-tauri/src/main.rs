@@ -52,6 +52,7 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("menu_view",           ("檢視",                   "View")),
     ("menu_window",         ("視窗",                   "Window")),
     ("back_to_app",         ("返回應用程式",           "Back to App")),
+    ("exit_app",            ("結束",                   "Exit")),
     ("search_settings",     ("搜尋設定…",              "Search settings…")),
     ("personal",            ("個人",                   "Personal")),
     ("integrations",        ("整合",                   "Integrations")),
@@ -99,6 +100,11 @@ fn t_with(key: &str, lang: &str, arg: &str) -> String {
     t(key, lang).replace("{}", arg)
 }
 
+/// UTF-8 安全截斷：以字元為單位（位元組切片 &s[..n] 落在多位元組字元中間會 panic）。
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 fn t(key: &str, lang: &str) -> String {
     for &(k, (zh, en)) in TRANSLATIONS {
         if k == key {
@@ -144,7 +150,7 @@ struct UiState {
     settings_section: usize, // 0 一般 | 1 權限 | 2 API 與模型 | 3 安全 | 4 MCP 伺服器
     settings_search: String,
     api_key_input: String,
-    work_mode:     String,  // "project" | "global"
+    work_mode: String, // "project" | "global"
     // Agent panel
     audit_results: Vec<AuditResult>,
     status_message: String,
@@ -365,6 +371,19 @@ impl AgnesApp {
             match std::env::var("AGNES_QA_VIEW").as_deref() {
                 Ok("settings") => st.settings_open = true,
                 Ok("history") => st.sidebar_tab = 1,
+                Ok("chat") => {
+                    // 載入最近一筆對話以渲染訊息流（驗證氣泡/碼塊/工具輸出樣式）
+                    if let Some((cid, _, _)) = st.conversations.first().cloned() {
+                        if let Ok(conn) = Connection::open(&app_state.db_path) {
+                            if let Ok(msgs) = app_lib::get_messages_for_conversation(&conn, &cid) {
+                                st.active_messages = msgs.into_iter()
+                                    .map(|m| ChatMessage { role: m.role, content: m.content })
+                                    .collect();
+                                st.active_conversation_id = Some(cid);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -976,10 +995,14 @@ impl AgnesApp {
             let conv_id = match &st.active_conversation_id {
                 Some(id) => id.clone(),
                 None => {
-                    let conn = Connection::open(&self.app_state.db_path).unwrap();
+                    let Ok(conn) = Connection::open(&self.app_state.db_path) else {
+                        st.status_message = "資料庫開啟失敗".into();
+                        return;
+                    };
+                    // 標題以「字元」截斷——位元組切片遇中文必 panic
                     let new_id = app_lib::create_conversation(
                         &conn,
-                        &prompt[..prompt.len().min(20)],
+                        &truncate_chars(&prompt, 20),
                     ).unwrap_or_default();
                     st.active_conversation_id = Some(new_id.clone());
                     new_id
@@ -988,16 +1011,24 @@ impl AgnesApp {
 
             st.active_messages.push(ChatMessage { role: "user".into(), content: prompt.clone() });
 
-            {
-                let conn = Connection::open(&self.app_state.db_path).unwrap();
+            if let Ok(conn) = Connection::open(&self.app_state.db_path) {
                 let _ = app_lib::add_conversation_message(&conn, &conv_id, "user", &prompt);
             }
 
-            let workspace = st.selected_paths.iter().next().cloned()
+            // 工作區確定性選擇：依專案資料夾的宣告順序取第一個被勾選者，
+            // 不依賴 HashSet 迭代順序（那是隨機的）
+            let workspace = st.selected_project_idx
+                .and_then(|i| st.projects.get(i))
+                .and_then(|p| {
+                    p.paths.iter()
+                        .find(|path| st.selected_paths.contains(*path))
+                        .cloned()
+                        .or_else(|| p.paths.first().cloned())
+                })
                 .or_else(|| {
-                    st.selected_project_idx
-                        .and_then(|i| st.projects.get(i))
-                        .and_then(|p| p.paths.first().cloned())
+                    let mut sorted: Vec<String> = st.selected_paths.iter().cloned().collect();
+                    sorted.sort();
+                    sorted.into_iter().next()
                 })
                 .unwrap_or_default();
 
@@ -1033,22 +1064,42 @@ impl AgnesApp {
                 }
             }
 
-            match agent_loop.run_step(
+            let step_result = agent_loop.run_step(
                 &mut messages,
                 &app_state_task.mcp_manager,
                 &app_state_task.token_budgeter,
                 &app_state_task.db_path,
-            ).await {
-                Ok(step) => {
+            ).await;
+
+            // 使用者按了中止：丟棄遲到的結果，不寫庫、不更新 UI
+            let aborted = matches!(
+                *app_state_task.agent_state.lock().await,
+                AgentExecutionState::Idle,
+            );
+
+            match step_result {
+                Ok(step) if !aborted => {
                     if let Ok(conn) = Connection::open(&app_state_task.db_path) {
                         let _ = app_lib::add_conversation_message(
                             &conn, &conversation_id, "assistant", &step.response_text,
                         );
+                        // 工具執行結果持久化並顯示——使用者必須看得到 AI 實際做了什麼
+                        for res in &step.execution_results {
+                            let _ = app_lib::add_conversation_message(
+                                &conn, &conversation_id, "tool", res,
+                            );
+                        }
                         let mut st = ui_state.lock().unwrap();
                         st.active_messages.push(ChatMessage {
                             role:    "assistant".into(),
                             content: step.response_text.clone(),
                         });
+                        for res in &step.execution_results {
+                            st.active_messages.push(ChatMessage {
+                                role:    "tool".into(),
+                                content: res.clone(),
+                            });
+                        }
                         st.audit_results = step.audits;
                     }
                     if step.requires_approval {
@@ -1059,12 +1110,15 @@ impl AgnesApp {
                         });
                     }
                 }
+                Ok(_) => {} // aborted：丟棄
                 Err(e) => {
-                    ui_state.lock().unwrap().status_message = format!("Error: {}", e);
+                    if !aborted {
+                        ui_state.lock().unwrap().status_message = format!("Error: {}", e);
+                    }
                 }
             }
 
-            {
+            if !aborted {
                 let mut s = app_state_task.agent_state.lock().await;
                 *s = AgentExecutionState::Complete;
             }
@@ -1161,11 +1215,57 @@ impl eframe::App for AgnesApp {
                         egui::RichText::new(format!("{}/{}", spent, budget_total))
                             .size(10.0).color(TEXT_MUTED),
                     );
+                    if ui.small_button("↻")
+                        .on_hover_text(if lang == "zh" { "重設 Token 計數" } else { "Reset token counter" })
+                        .clicked()
+                    {
+                        if let Ok(mut b) = self.app_state.token_budgeter.try_lock() {
+                            b.spent_prompt = 0;
+                            b.spent_completion = 0;
+                        }
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        for key in &["menu_window", "menu_view", "menu_file"] {
-                            let _ = ui.button(egui::RichText::new(t(key, &lang)).size(12.0));
-                        }
+                        ui.menu_button(egui::RichText::new(t("menu_view", &lang)).size(12.0), |ui| {
+                            if ui.button(format!("🌐 {}", t("language", &lang))).clicked() {
+                                let mut st = self.ui_state.lock().unwrap();
+                                st.language = if st.language == "zh" { "en".into() } else { "zh".into() };
+                                let mut cfg = self.app_state.config.lock().unwrap().clone();
+                                cfg.general.language = if st.language == "zh" { "zh-TW".into() } else { "en-US".into() };
+                                let _ = cfg.save();
+                                *self.app_state.config.lock().unwrap() = cfg;
+                                ui.close_menu();
+                            }
+                            let mode_label = {
+                                let st = self.ui_state.lock().unwrap();
+                                if st.work_mode == "global" { t("work_mode_project", &lang) } else { t("work_mode_global", &lang) }
+                            };
+                            if ui.button(format!("⇄ {}", mode_label)).clicked() {
+                                let mut st = self.ui_state.lock().unwrap();
+                                st.work_mode = if st.work_mode == "global" { "project".into() } else { "global".into() };
+                                let mut cfg = self.app_state.config.lock().unwrap().clone();
+                                cfg.general.project_mode = st.work_mode.clone();
+                                let _ = cfg.save();
+                                *self.app_state.config.lock().unwrap() = cfg;
+                                ui.close_menu();
+                            }
+                        });
+                        ui.menu_button(egui::RichText::new(t("menu_file", &lang)).size(12.0), |ui| {
+                            if ui.button(format!("＋ {}", t("new_conversation", &lang))).clicked() {
+                                let mut st = self.ui_state.lock().unwrap();
+                                st.active_conversation_id = None;
+                                st.active_messages.clear();
+                                ui.close_menu();
+                            }
+                            if ui.button(format!("⚙ {}", t("settings", &lang))).clicked() {
+                                self.ui_state.lock().unwrap().settings_open = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button(format!("⏻ {}", t("exit_app", &lang))).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                        });
                     });
                 });
             });
@@ -1578,4 +1678,25 @@ fn main() {
         options,
         Box::new(|cc| Ok(Box::new(AgnesApp::new(cc)))),
     );
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncate_chars_handles_cjk_boundaries() {
+        // 舊版位元組切片 &s[..20] 在這裡會 panic（每個中文字 3 bytes）
+        let s = "請幫我建立一個完整的應用程式專案企劃";
+        let cut = truncate_chars(s, 20);
+        assert_eq!(cut.chars().count(), 18); // 全長 18 字 < 20，完整保留
+        let cut7 = truncate_chars(s, 7);
+        assert_eq!(cut7, "請幫我建立一個");
+    }
+
+    #[test]
+    fn truncate_chars_ascii_and_empty() {
+        assert_eq!(truncate_chars("hello world", 5), "hello");
+        assert_eq!(truncate_chars("", 10), "");
+    }
 }
