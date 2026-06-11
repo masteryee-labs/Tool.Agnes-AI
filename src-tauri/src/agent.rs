@@ -112,6 +112,38 @@ impl AgentEngine {
     }
 }
 
+/// 引號感知的指令切割：支援 "雙引號" 與 '單引號' 包住含空白的引數
+/// （split_whitespace 會把 "C:\\Program Files\\x" 切碎）。
+pub fn split_command_line(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for c in input.chars() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else {
+                    current.push(c);
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        parts.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(c),
+            },
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
 /// 工作區路徑正規化：Windows 8.3 短檔名（如 MASTER~1）與長路徑在前綴比對時
 /// 不相等，會讓路徑圈禁誤判越權、阻擋一切寫入。統一展開為去 \\?\ 前綴的長路徑。
 fn normalize_workspace(p: PathBuf) -> PathBuf {
@@ -339,14 +371,30 @@ impl AgentLoop {
                     }
                 }
 
-                // 終端蒸餾歸檔：對話 token 增量觸及閾值時，喚醒第一組蒸餾管線
+                // 終端蒸餾歸檔：對話 token 增量觸及閾值時，喚醒第一組蒸餾管線。
+                // 水位記號：只在「相對上次蒸餾再增長一個閾值」時觸發，防止每輪重複蒸餾。
                 let conversation_text: String = messages.iter()
                     .filter_map(|m| m["content"].as_str())
                     .chain(std::iter::once(response_text.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n");
-                if crate::memory::estimate_tokens(&conversation_text)
-                    >= self.config.memory.distill_trigger_delta
+                let conv_tokens = crate::memory::estimate_tokens(&conversation_text) as i64;
+                let conv_hash = {
+                    use sha2::{Digest, Sha256};
+                    let first_user = messages.iter()
+                        .find(|m| m["role"] == "user")
+                        .and_then(|m| m["content"].as_str())
+                        .unwrap_or("");
+                    let mut hasher = Sha256::new();
+                    hasher.update(first_user.as_bytes());
+                    format!("{:x}", hasher.finalize())
+                };
+                let last_distill_tokens = crate::open_connection(db_path)
+                    .ok()
+                    .and_then(|conn| crate::get_distill_marker(&conn, &conv_hash).ok())
+                    .unwrap_or(0);
+                if conv_tokens - last_distill_tokens
+                    >= self.config.memory.distill_trigger_delta as i64
                 {
                     // 蒸餾 await 階段不持有 SQLite 連線（Connection 非 Sync）
                     match memory_manager.distill_text(
@@ -356,9 +404,13 @@ impl AgentLoop {
                         Ok(distilled) => {
                             let slug = format!("conv_{}", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
                             match crate::open_connection(db_path).map_err(|e| e.to_string())
-                                .and_then(|conn| memory_manager.save_memory(
-                                    &conn, "conversations", &slug, &distilled, &self.config.memory,
-                                ))
+                                .and_then(|conn| {
+                                    let path = memory_manager.save_memory(
+                                        &conn, "conversations", &slug, &distilled, &self.config.memory,
+                                    )?;
+                                    let _ = crate::set_distill_marker(&conn, &conv_hash, conv_tokens);
+                                    Ok(path)
+                                })
                             {
                                 Ok(path) => execution_results.push(
                                     format!("[MEMORY] 對話已蒸餾歸檔: {}", path.display()),
@@ -634,12 +686,12 @@ impl AgentLoop {
                     }
                 }
                 "run_command" => {
-                    let cmd_parts: Vec<&str> = tool.content.split_whitespace().collect();
+                    let cmd_parts: Vec<String> = split_command_line(&tool.content);
                     if cmd_parts.is_empty() {
                         return "[ERROR] 指令為空".to_string();
                     }
-                    let program = cmd_parts[0];
-                    let args: Vec<&str> = cmd_parts[1..].to_vec();
+                    let program = cmd_parts[0].as_str();
+                    let args: Vec<&str> = cmd_parts[1..].iter().map(|s| s.as_str()).collect();
                     let workspace = if self.config.general.project_mode == "project" {
                         Some(&self.workspace_path)
                     } else {
