@@ -72,6 +72,17 @@ pub struct ConversationMessage {
     pub created_at: String,
 }
 
+/// 單筆檔案變更：write_file 工具寫入前後的完整內容快照（GUI 右側 diff 面板資料來源）。
+#[derive(Debug, Clone)]
+pub struct FileChangeRecord {
+    pub id: i64,
+    pub conversation_id: String,
+    pub file_path: String,
+    pub before_content: String,
+    pub after_content: String,
+    pub written_at: String,
+}
+
 // ─── DB initialization ───────────────────────────────────────────────────────
 
 pub fn init_db(conn: &Connection) -> Result<()> {
@@ -166,6 +177,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             content
         );
 
+        CREATE TABLE IF NOT EXISTS file_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            before_content TEXT NOT NULL,
+            after_content TEXT NOT NULL,
+            written_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS distill_markers (
             conv_hash TEXT PRIMARY KEY,
             tokens INTEGER NOT NULL,
@@ -183,6 +203,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_conv_audits
             ON conversation_audits(conversation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_file_changes_conv
+            ON file_changes(conversation_id);
         ",
     )?;
 
@@ -531,6 +554,49 @@ fn query_conv_messages(stmt: &mut rusqlite::Statement, conversation_id: &str) ->
     msg_iter.collect()
 }
 
+// ─── File change tracking（write_file before/after 快照，供 GUI diff 面板）────
+
+/// 記錄一次檔案寫入的 before/after 全文快照。
+/// written_at 由 SQLite CURRENT_TIMESTAMP 生成，與其他表的時間戳慣例一致。
+/// 接收 db_path 而非 Connection：呼叫點（agent.rs execute_tool）不持有連線。
+pub fn add_file_change(
+    db_path: &Path,
+    conversation_id: &str,
+    file_path: &str,
+    before: &str,
+    after: &str,
+) -> Result<()> {
+    let conn = open_connection(db_path)?;
+    conn.execute(
+        "INSERT INTO file_changes (conversation_id, file_path, before_content, after_content, written_at) \
+         VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
+        params![conversation_id, file_path, before, after],
+    )?;
+    Ok(())
+}
+
+/// 讀回該對話的全部檔案變更，按寫入順序（id ASC）。
+pub fn get_file_changes(db_path: &Path, conversation_id: &str) -> Result<Vec<FileChangeRecord>> {
+    let conn = open_connection(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, conversation_id, file_path, before_content, after_content, written_at \
+         FROM file_changes \
+         WHERE conversation_id = ?1 \
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![conversation_id], |row| {
+        Ok(FileChangeRecord {
+            id: row.get(0)?,
+            conversation_id: row.get(1)?,
+            file_path: row.get(2)?,
+            before_content: row.get(3)?,
+            after_content: row.get(4)?,
+            written_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn delete_conversation(conn: &Connection, conversation_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM conversation_messages WHERE conversation_id = ?1",
@@ -709,4 +775,57 @@ pub fn add_token_log(
         params![task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd],
     )?;
     Ok(())
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod file_change_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 每測試獨立暫存 DB（pid + 奈秒時戳），避免並行測試互踩同一檔案。
+    fn temp_db(tag: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "agnes_test_fc_{}_{}_{}.db",
+            tag,
+            std::process::id(),
+            unique
+        ))
+    }
+
+    #[test]
+    fn file_change_roundtrip_ordered_by_id() {
+        let db = temp_db("roundtrip");
+        add_file_change(&db, "conv-1", "src/a.rs", "old a", "new a").unwrap();
+        add_file_change(&db, "conv-1", "src/b.rs", "", "fresh file").unwrap();
+
+        let changes = get_file_changes(&db, "conv-1").unwrap();
+        assert_eq!(changes.len(), 2);
+        // id ASC ＝ 寫入順序
+        assert!(changes[0].id < changes[1].id);
+        assert_eq!(changes[0].file_path, "src/a.rs");
+        assert_eq!(changes[0].before_content, "old a");
+        assert_eq!(changes[0].after_content, "new a");
+        assert_eq!(changes[1].before_content, "");
+        assert!(!changes[0].written_at.is_empty());
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn file_changes_isolated_per_conversation() {
+        let db = temp_db("isolated");
+        add_file_change(&db, "conv-a", "x.txt", "1", "2").unwrap();
+
+        // 無記錄的對話 → 空集合（非錯誤）
+        assert!(get_file_changes(&db, "conv-b").unwrap().is_empty());
+        assert_eq!(get_file_changes(&db, "conv-a").unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&db);
+    }
 }

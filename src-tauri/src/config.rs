@@ -205,6 +205,15 @@ pub struct GeneralConfig {
     pub ui_scale: f32,
     #[serde(default)]
     pub active_project_id: Option<String>,
+    /// 右側面板（代理人/變更/檔案）啟動時是否展開
+    #[serde(default = "default_right_panel_open")]
+    pub right_panel_open_default: bool,
+    /// 變更 Tab diff 視圖的輸出行數上限（stats 仍全量計算）
+    #[serde(default = "default_diff_view_max_lines")]
+    pub diff_view_max_lines: usize,
+    /// 檔案 Tab 唯讀檢視器可載入的檔案大小上限（bytes）
+    #[serde(default = "default_file_viewer_max_bytes")]
+    pub file_viewer_max_bytes: usize,
 }
 
 fn default_work_mode() -> String { "project".to_string() }
@@ -212,6 +221,9 @@ fn default_shell() -> String { "PowerShell".to_string() }
 fn default_language() -> String { "auto".to_string() }
 fn default_locale_charset() -> String { "en-US".to_string() }
 fn default_ui_scale() -> f32 { 1.25 }
+fn default_right_panel_open() -> bool { true }
+fn default_diff_view_max_lines() -> usize { 800 }
+fn default_file_viewer_max_bytes() -> usize { 512_000 }
 /// 介面縮放允許範圍（防止誤設成 0 讓視窗不可用）
 pub const UI_SCALE_MIN: f32 = 1.0;
 pub const UI_SCALE_MAX: f32 = 1.75;
@@ -225,6 +237,9 @@ impl Default for GeneralConfig {
             locale_charset: "en-US".to_string(),
             ui_scale: default_ui_scale(),
             active_project_id: None,
+            right_panel_open_default: default_right_panel_open(),
+            diff_view_max_lines: default_diff_view_max_lines(),
+            file_viewer_max_bytes: default_file_viewer_max_bytes(),
         }
     }
 }

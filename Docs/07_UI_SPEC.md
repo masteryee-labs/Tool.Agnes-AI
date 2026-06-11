@@ -2,7 +2,22 @@
 
 > 技術：eframe/egui 0.31 原生渲染。零 Chromium。`ui/` 內的 HTML 原型僅作版面參考，最終以 egui 實作。
 
-## 已實作現況（2026-06-11）
+## 已實作現況（2026-06-11 第二輪：Claude Desktop 式改版 v0.6.0）
+
+- **模組拆分**：GUI 由單檔 main.rs 拆出三個 bin 模組——`ui_theme.rs`（全部色彩/圓角/間距/字級具名常數 + `apply_theme`）、`ui_chat.rs`（訊息流渲染）、`ui_panels.rs`（右側三 Tab 面板）；main.rs 淨縮約 1,000 行
+- **頂列麵包屑**：「📁 專案名｜🌍 全域 / Session 標題或新對話」；右叢集：檔案/檢視選單、語言、▤ 右面板開關、Token 預算條、⚙
+- **左側欄**：品牌橘「＋ 新增對話」整寬鈕 → 膠囊 segmented「專案｜全域」（切 Tab 同步 work_mode 與 config）→「最近」目前範疇最新 8 筆 Session（相對時間、hover 🗑）→ 專案摺疊樹/全域列表 → 底部 ⚙ + 模式徽章
+- **訊息流（Claude Desktop 式）**：
+  - user＝整寬淡色卡；assistant＝無氣泡純文字
+  - **Think 收闔**：工具標籤前的自由文字 >3 行渲染為「✱ 思考過程（N 行）›」弱色斜體列，預設收闔；`<think>` 標籤同樣處理；最終結論永遠直出
+  - **活動卡片**：每個 `<read_file>/<write_file>/<run_command>/<run_mcp>` 標籤＝可收闔活動列（「📖 讀取: path ›」等），展開顯示參數＋依序配對的 tool 結果；連續多列聚成「⚙ 執行了 N 個動作 ›」群組卡；配對掉的 tool 訊息不再重複渲染
+  - **變更 chips**：對話尾端列出「✎ 檔名 +a −r」（diff stats 按 change_id 快取於 UiState），點擊開右面板「變更」Tab
+- **右側面板三 Tab**：🤖 代理人（22 人 G1–G6 + 待審批，功能沿用）｜✎ 變更（file_changes 列表 + diff 視圖：行號、綠底/紅底、diff/全文切換）｜📄 檔案（唯讀檢視器，>file_viewer_max_bytes 顯示過大提示）
+- **檔案變更追蹤後端**：`file_changes` 表（db.rs）+ `diffview.rs` 行級 LCS diff（`line_diff`，DP 保險絲退化全刪全增）；agent.rs write_file 在 strip_secrets 後快照前後內容，`AgentLoop::set_conversation_id` 掛載於送出與 Approve 兩路徑
+- **新組態**（GeneralConfig，皆 serde default，舊 config 可照常載入）：`right_panel_open_default=true`、`diff_view_max_lines=800`、`file_viewer_max_bytes=512000`
+- **QA 鉤子**：AGNES_QA_VIEW=global 現同步切 work_mode（與真實點擊一致）；展示對話種子腳本 `scratch/qa_seed_demo_conv.py`；v0.6 實證截圖 `qa_screenshots/v060_*.png`
+
+## 上一輪現況（2026-06-11 第一輪）
 
 - **側邊欄 Tab 化**：頂部「📁 專案｜🌍 全域」雙 Tab，切 Tab 即切工作模式（同步寫回 `config.general.project_mode`）
   - 專案 Tab：「＋ 新增專案」直接挑資料夾建專案；每個專案為摺疊節點，底下巢狀該專案的對話 Session（點擊載入續聊、🗑 刪除）與資料夾管理子摺疊
@@ -19,18 +34,19 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ 標題列：Agnes AI ▾ │ 模式徽章 │ Token 計量表 │ ⚙ 設定         │
+│ 📁 專案｜🌍 全域 / Session │ 選單 │ EN │ ▤ │ Token 計量 │ ⚙   │
 ├──────────┬───────────────────────────────┬───────────────────┤
-│ 左側欄    │ 中央對話/工作區                │ 右側面板           │
-│           │                               │                   │
-│ +新對話   │  訊息流（使用者/代理/審查記錄）  │ ConfirmationGate  │
-│ 對話歷史  │                               │  PendingActions   │
-│ 排程任務  │  ┌─────────────────────────┐  │  [Approve][Reject]│
-│           │  │ 輸入框                    │  │                   │
-│ Projects  │  │ + │模型選擇▾│風險徽章│🎤│  │ 代理人狀態樹       │
-│  ├ 專案A  │  │ 📁 專案▾ │模式▾ │分支▾ │  │  (22人/休眠/激活) │
-│  └ 專案B  │  └─────────────────────────┘  │                   │
-│ 設定      │                               │ 審計日誌(可回放)   │
+│ 左側欄    │ 中央訊息流                     │ 右側面板（三 Tab） │
+│           │  user 淡色卡                  │ 🤖 代理人          │
+│ +新對話   │  ✱ 思考過程（N 行）›（收闔）    │   22人 G1–G6 樹    │
+│ 專案｜全域 │  📖 讀取: path ›（活動列）     │   待審批 Gate      │
+│ 最近      │  ⚙ 執行了 N 個動作 ›（群組）   │ ✎ 變更            │
+│  Session… │  結論文字（永遠直出）           │   檔案列表+diff    │
+│ 專案樹    │  ✎ 檔名 +a −r（變更 chips）    │ 📄 檔案            │
+│  ├ 專案A  │  ┌─────────────────────────┐  │   唯讀檢視器       │
+│  └ 專案B  │  │ 輸入卡（圓角 14）         │  │                   │
+│ ⚙ 設定   │  │ + │📁▾│🌍│   模型名│(↑) │  │                   │
+│  +模式徽章│  └─────────────────────────┘  │                   │
 └──────────┴───────────────────────────────┴───────────────────┘
 ```
 

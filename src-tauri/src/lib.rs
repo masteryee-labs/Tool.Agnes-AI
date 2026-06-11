@@ -1,5 +1,6 @@
 mod config;
 mod db;
+pub mod diffview;
 mod locale;
 mod sandbox;
 mod orchestrator;
@@ -17,6 +18,7 @@ pub use config::McpServerConfig;
 pub use config::key_persistence;
 pub use config::{UI_SCALE_MAX, UI_SCALE_MIN};
 pub use db::*;
+pub use diffview::*;
 pub use locale::*;
 pub use sandbox::*;
 pub use orchestrator::Orchestrator;
