@@ -112,6 +112,21 @@ impl AgentEngine {
     }
 }
 
+/// 工作區路徑正規化：Windows 8.3 短檔名（如 MASTER~1）與長路徑在前綴比對時
+/// 不相等，會讓路徑圈禁誤判越權、阻擋一切寫入。統一展開為去 \\?\ 前綴的長路徑。
+fn normalize_workspace(p: PathBuf) -> PathBuf {
+    if p.as_os_str().is_empty() {
+        return p;
+    }
+    match std::fs::canonicalize(&p) {
+        Ok(c) => {
+            let s = c.to_string_lossy().to_string();
+            PathBuf::from(s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s))
+        }
+        Err(_) => p,
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // AgentLoop — main orchestration entry point
 // ──────────────────────────────────────────────────────────────────────────────
@@ -125,7 +140,7 @@ impl AgentLoop {
     pub fn new(config: Config, workspace_path: String) -> Self {
         Self {
             config,
-            workspace_path: PathBuf::from(workspace_path),
+            workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
         }
     }
 

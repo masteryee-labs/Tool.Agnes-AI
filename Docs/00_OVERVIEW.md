@@ -15,6 +15,7 @@
 | [06_AGENT_TEAM.md](06_AGENT_TEAM.md) | 22 人專家團隊與寫檔前 22 道交叉驗證管線 |
 | [07_UI_SPEC.md](07_UI_SPEC.md) | 介面規格：Projects 多資料夾、模式切換、確認面板 |
 | [08_ROADMAP.md](08_ROADMAP.md) | 接續開發路線圖（Phase 0–4） |
+| [09_QA_REPORT.md](09_QA_REPORT.md) | 真實 QA 報告：API 大中小任務實測 + 自我截圖驗證 |
 
 ## 現況（2026-06）
 

@@ -51,6 +51,42 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("menu_file",           ("檔案",                   "File")),
     ("menu_view",           ("檢視",                   "View")),
     ("menu_window",         ("視窗",                   "Window")),
+    ("back_to_app",         ("返回應用程式",           "Back to App")),
+    ("search_settings",     ("搜尋設定…",              "Search settings…")),
+    ("personal",            ("個人",                   "Personal")),
+    ("integrations",        ("整合",                   "Integrations")),
+    ("api_models",          ("API 與模型",             "API & Models")),
+    ("mcp_servers",         ("MCP 伺服器",             "MCP Servers")),
+    ("mcp_servers_desc",    ("連接外部工具和資料來源。", "Connect external tools and data sources.")),
+    ("add_server",          ("新增伺服器",             "Add Server")),
+    ("servers",             ("伺服器",                 "Servers")),
+    ("work_mode",           ("工作模式",               "Work Mode")),
+    ("work_mode_desc",      ("選擇 Agnes 的執行範圍",   "Choose the execution scope for Agnes")),
+    ("mode_project_desc",   ("僅限選定的專案資料夾，路徑圈禁", "Restricted to selected project folders")),
+    ("mode_global_desc",    ("全電腦操作，逐項確認後才執行", "Full computer access, per-action confirmation")),
+    ("default_perm",        ("預設權限",               "Default Permissions")),
+    ("default_perm_desc",   ("預設情況下，Agnes 可讀取及編輯其工作區中的檔案。需要時可要求額外存取權限",
+                             "By default Agnes can read and edit files in its workspace. It can request extra access when needed")),
+    ("auto_review_desc",    ("Agnes 會自動審查工具呼叫（22 道交叉驗證），通過才執行",
+                             "Agnes auto-reviews tool calls (22-gate validation) before executing")),
+    ("full_access_desc",    ("以完整存取權執行時可編輯任何檔案並執行指令。這會大幅增加風險",
+                             "Full access can edit any file and run commands. This greatly increases risk")),
+    ("shell_desc",          ("選擇在整合終端中開啟的 Shell。", "Choose the shell used by the integrated terminal.")),
+    ("language_desc",       ("應用程式 UI 的語言",      "Language of the application UI")),
+    ("api_key",             ("API 金鑰",               "API Key")),
+    ("api_key_desc",        ("僅儲存於本機 config.local.toml，永不進入版本控制",
+                             "Stored locally in config.local.toml only, never committed")),
+    ("api_key_saved",       ("已儲存（指紋 {}）",       "Saved (fingerprint {})")),
+    ("model",               ("模型",                   "Model")),
+    ("model_desc",          ("任務主模型名稱",          "Primary model for tasks")),
+    ("session_budget",      ("Session Token 預算",     "Session Token Budget")),
+    ("session_budget_desc", ("達到預算後鎖定 API 呼叫，僅允許確定性操作",
+                             "API calls lock at budget; only deterministic ops continue")),
+    ("sandbox_timeout",     ("沙盒逾時（秒）",          "Sandbox Timeout (s)")),
+    ("sandbox_timeout_desc",("單一指令的最長執行時間",   "Maximum runtime for a single command")),
+    ("max_retries",         ("最大重試次數",            "Max Retries")),
+    ("max_retries_desc",    ("沙盒執行失敗的自愈重試上限", "Self-healing retry cap on sandbox failure")),
+    ("no_results",          ("沒有符合的設定",          "No matching settings")),
     ("clear_chat",          ("清除當前對話",           "Clear Chat")),
     ("add_project_folder",  ("新增專案資料夾…",        "Add Project Folder…")),
     ("untitled",            ("(無標題)",               "(Untitled)")),
@@ -105,7 +141,9 @@ struct UiState {
     // Settings / i18n / mode
     language:     String,   // "zh" | "en"
     settings_open: bool,
-    settings_tab:  usize,
+    settings_section: usize, // 0 一般 | 1 權限 | 2 API 與模型 | 3 安全 | 4 MCP 伺服器
+    settings_search: String,
+    api_key_input: String,
     work_mode:     String,  // "project" | "global"
     // Agent panel
     audit_results: Vec<AuditResult>,
@@ -126,7 +164,9 @@ impl Default for UiState {
             active_conversation_id: None,
             language:     "zh".into(),
             settings_open: false,
-            settings_tab:  0,
+            settings_section: 0,
+            settings_search: String::new(),
+            api_key_input: String::new(),
             work_mode:     "project".into(),
             audit_results: Vec::new(),
             status_message: String::new(),
@@ -135,11 +175,91 @@ impl Default for UiState {
     }
 }
 
+// ─── QA 自我截圖模式 ─────────────────────────────────────────────────────────
+// AGNES_QA_SHOT=<png路徑> 啟動時：暖機數幀後對「本應用程式視窗自身」截圖存檔並退出。
+// 不讀取螢幕、不控制滑鼠鍵盤——影像來自 egui 自己的渲染管線。
+
+/// 截圖前的暖機幀數（等字型載入與版面穩定）
+const QA_WARMUP_FRAMES: u32 = 12;
+
+fn save_color_image_png(img: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
+    let [w, h] = img.size;
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for px in &img.pixels {
+        rgba.extend_from_slice(&px.to_array());
+    }
+    let buf = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+        .ok_or_else(|| "RGBA buffer size mismatch".to_string())?;
+    buf.save(path).map_err(|e| e.to_string())
+}
+
+/// Codex 風格設定列：左側標題+描述，右側控制項，卡片背景。
+fn settings_row(
+    ui: &mut egui::Ui,
+    search: &str,
+    title: &str,
+    desc: &str,
+    control: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    if !search.trim().is_empty()
+        && !title.to_lowercase().contains(&search.trim().to_lowercase())
+        && !desc.to_lowercase().contains(&search.trim().to_lowercase())
+    {
+        return false;
+    }
+    egui::Frame::default()
+        .fill(BG_CARD)
+        .corner_radius(8)
+        .inner_margin(14.0)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let control_width = 220.0;
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - control_width).max(200.0));
+                    ui.label(egui::RichText::new(title).size(15.0).color(TEXT_PRIMARY).strong());
+                    if !desc.is_empty() {
+                        ui.label(egui::RichText::new(desc).size(12.5).color(TEXT_SECONDARY));
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
+            });
+        });
+    ui.add_space(8.0);
+    true
+}
+
+/// Codex 風格 toggle 開關。
+fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
+    let desired_size = egui::vec2(40.0, 22.0);
+    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let how_on = ui.ctx().animate_bool(response.id, *on);
+    let bg = egui::Color32::from_rgb(
+        (60.0 + how_on * (43.0 - 60.0)) as u8,
+        (60.0 + how_on * (134.0 - 60.0)) as u8,
+        (60.0 + how_on * (255.0 - 60.0)) as u8,
+    );
+    let radius = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, radius, bg);
+    let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+    ui.painter().circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        radius - 3.0,
+        egui::Color32::WHITE,
+    );
+    response
+}
+
 // ─── Main App ────────────────────────────────────────────────────────────────
 
 struct AgnesApp {
     app_state: Arc<AppState>,
     ui_state:  Arc<Mutex<UiState>>,
+    qa_shot:   Option<std::path::PathBuf>,
+    qa_frames: u32,
 }
 
 /// 載入作業系統 CJK 字型（egui default_fonts 不含中文字形，缺此步全部渲染為方框亂碼）。
@@ -238,7 +358,344 @@ impl AgnesApp {
             st.work_mode = config_lock.general.project_mode.clone();
         }
 
-        Self { app_state, ui_state }
+        // QA 自我截圖模式：AGNES_QA_SHOT=輸出路徑，AGNES_QA_VIEW=settings|history 切換視圖
+        let qa_shot = std::env::var("AGNES_QA_SHOT").ok().map(std::path::PathBuf::from);
+        if qa_shot.is_some() {
+            let mut st = ui_state.lock().unwrap();
+            match std::env::var("AGNES_QA_VIEW").as_deref() {
+                Ok("settings") => st.settings_open = true,
+                Ok("history") => st.sidebar_tab = 1,
+                _ => {}
+            }
+        }
+
+        Self { app_state, ui_state, qa_shot, qa_frames: 0 }
+    }
+
+    /// QA 截圖鉤子：每幀呼叫。暖機後送出截圖指令，收到影像即存檔退出。
+    fn qa_screenshot_hook(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.qa_shot.clone() else { return };
+        self.qa_frames += 1;
+        if self.qa_frames == QA_WARMUP_FRAMES {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| {
+                if let egui::Event::Screenshot { image, .. } = e {
+                    Some(image.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(img) = shot {
+            match save_color_image_png(&img, &path) {
+                Ok(()) => println!("[QA] screenshot saved: {}", path.display()),
+                Err(e) => eprintln!("[QA] screenshot save failed: {}", e),
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        ctx.request_repaint();
+    }
+
+    /// Codex 風格全頁式設定：左側設定導航 + 右側卡片式設定列。
+    fn render_settings_page(&self, ctx: &egui::Context, lang: &str) {
+        let mut st = self.ui_state.lock().unwrap();
+
+        // ── 左側：設定導航 ──
+        egui::SidePanel::left("settings_nav")
+            .default_width(230.0)
+            .min_width(200.0)
+            .show(ctx, |ui| {
+                ui.add_space(10.0);
+                if ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(format!("←  {}", t("back_to_app", lang))).size(14.0),
+                    ).frame(false),
+                ).clicked() {
+                    st.settings_open = false;
+                    st.settings_search.clear();
+                }
+                ui.add_space(10.0);
+
+                // 搜尋框
+                egui::Frame::default()
+                    .fill(BG_TERTIARY)
+                    .corner_radius(8)
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("🔍").size(13.0).color(TEXT_MUTED));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut st.settings_search)
+                                    .hint_text(t("search_settings", lang))
+                                    .desired_width(f32::INFINITY)
+                                    .frame(false),
+                            );
+                        });
+                    });
+                ui.add_space(14.0);
+
+                // 導航分組
+                ui.label(egui::RichText::new(t("personal", lang)).size(12.0).color(TEXT_MUTED));
+                ui.add_space(4.0);
+                let personal: &[(usize, &str, &str)] = &[
+                    (0, "⚙", "general"),
+                    (1, "🛡", "permissions"),
+                    (2, "🔑", "api_models"),
+                    (3, "🔒", "security"),
+                ];
+                for (idx, icon, key) in personal {
+                    if ui.selectable_label(
+                        st.settings_section == *idx,
+                        egui::RichText::new(format!("{}  {}", icon, t(key, lang))).size(13.5),
+                    ).clicked() {
+                        st.settings_section = *idx;
+                    }
+                }
+
+                ui.add_space(12.0);
+                ui.label(egui::RichText::new(t("integrations", lang)).size(12.0).color(TEXT_MUTED));
+                ui.add_space(4.0);
+                if ui.selectable_label(
+                    st.settings_section == 4,
+                    egui::RichText::new(format!("🔌  {}", t("mcp_servers", lang))).size(13.5),
+                ).clicked() {
+                    st.settings_section = 4;
+                }
+            });
+
+        // ── 右側：設定內容 ──
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(24.0);
+                let inner_width = ui.available_width().min(860.0);
+                ui.vertical_centered(|ui| {
+                    ui.set_max_width(inner_width);
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        self.render_settings_section(ui, &mut st, lang);
+                    });
+                });
+                ui.add_space(40.0);
+            });
+        });
+    }
+
+    fn render_settings_section(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) {
+        let section = st.settings_section;
+        let search = st.settings_search.clone();
+        let section_title_key = match section {
+            0 => "general", 1 => "permissions", 2 => "api_models", 3 => "security", _ => "mcp_servers",
+        };
+        ui.label(
+            egui::RichText::new(t(section_title_key, lang))
+                .size(26.0).color(TEXT_PRIMARY).strong(),
+        );
+        ui.add_space(18.0);
+
+        let mut cfg = self.app_state.config.lock().unwrap().clone();
+        let mut cfg_changed = false;
+        let mut shown = 0;
+
+        match section {
+            0 => {
+                // 工作模式：兩張選擇卡片（Codex 風格）
+                if search.trim().is_empty() {
+                    ui.label(egui::RichText::new(t("work_mode", lang)).size(17.0).color(TEXT_PRIMARY).strong());
+                    ui.label(egui::RichText::new(t("work_mode_desc", lang)).size(12.5).color(TEXT_SECONDARY));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let card_w = (ui.available_width() - 12.0) / 2.0;
+                        let modes = [
+                            ("project", "📁", "work_mode_project", "mode_project_desc"),
+                            ("global", "🌍", "work_mode_global", "mode_global_desc"),
+                        ];
+                        for (mode, icon, title_key, desc_key) in modes {
+                            let selected = st.work_mode == mode;
+                            let stroke = if selected {
+                                egui::Stroke::new(1.5, ACCENT_BLUE)
+                            } else {
+                                egui::Stroke::new(1.0, BORDER)
+                            };
+                            let resp = egui::Frame::default()
+                                .fill(BG_CARD)
+                                .stroke(stroke)
+                                .corner_radius(10)
+                                .inner_margin(14.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w - 28.0);
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(icon).size(18.0));
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(t(title_key, lang)).size(14.5).strong());
+                                            ui.label(egui::RichText::new(t(desc_key, lang)).size(11.5).color(TEXT_SECONDARY));
+                                        });
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            let mark = if selected { "🔘" } else { "⚪" };
+                                            ui.label(egui::RichText::new(mark).size(13.0));
+                                        });
+                                    });
+                                }).response;
+                            if resp.interact(egui::Sense::click()).clicked() {
+                                st.work_mode = mode.to_string();
+                                cfg.general.project_mode = mode.to_string();
+                                cfg_changed = true;
+                            }
+                        }
+                    });
+                    ui.add_space(16.0);
+                    shown += 1;
+                }
+
+                shown += settings_row(ui, &search, &t("language", lang), &t("language_desc", lang), |ui| {
+                    let current = if st.language == "zh" { "繁體中文" } else { "English" };
+                    egui::ComboBox::from_id_salt("lang_combo")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(st.language == "zh", "繁體中文 (zh-TW)").clicked() {
+                                st.language = "zh".into();
+                            }
+                            if ui.selectable_label(st.language == "en", "English (en-US)").clicked() {
+                                st.language = "en".into();
+                            }
+                        });
+                }) as usize;
+                if st.language == "zh" && cfg.general.language != "zh-TW" {
+                    cfg.general.language = "zh-TW".into();
+                    cfg_changed = true;
+                } else if st.language == "en" && cfg.general.language != "en-US" {
+                    cfg.general.language = "en-US".into();
+                    cfg_changed = true;
+                }
+
+                shown += settings_row(ui, &search, &t("terminal_shell", lang), &t("shell_desc", lang), |ui| {
+                    egui::ComboBox::from_id_salt("shell_combo")
+                        .selected_text(cfg.general.shell.clone())
+                        .show_ui(ui, |ui| {
+                            for shell in ["PowerShell", "cmd", "sh"] {
+                                if ui.selectable_label(cfg.general.shell == shell, shell).clicked() {
+                                    cfg.general.shell = shell.to_string();
+                                    cfg_changed = true;
+                                }
+                            }
+                        });
+                }) as usize;
+            }
+            1 => {
+                let mut default_perm = !cfg.security.full_access;
+                shown += settings_row(ui, &search, &t("default_perm", lang), &t("default_perm_desc", lang), |ui| {
+                    if toggle_switch(ui, &mut default_perm).changed() {
+                        cfg.security.full_access = !default_perm;
+                        cfg_changed = true;
+                    }
+                }) as usize;
+
+                shown += settings_row(ui, &search, &t("auto_review", lang), &t("auto_review_desc", lang), |ui| {
+                    if toggle_switch(ui, &mut cfg.security.auto_review).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+
+                shown += settings_row(ui, &search, &t("full_access", lang), &t("full_access_desc", lang), |ui| {
+                    if toggle_switch(ui, &mut cfg.security.full_access).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+            }
+            2 => {
+                let fingerprint = if cfg.api.key.is_empty() {
+                    "—".to_string()
+                } else {
+                    app_lib::key_persistence::hash_key(&cfg.api.key)[..8].to_string()
+                };
+                shown += settings_row(
+                    ui, &search, &t("api_key", lang),
+                    &format!("{}\n{}", t("api_key_desc", lang), t_with("api_key_saved", lang, &fingerprint)),
+                    |ui| {
+                        if ui.button(t("save", lang)).clicked() && !st.api_key_input.trim().is_empty() {
+                            cfg.api.key = st.api_key_input.trim().to_string();
+                            st.api_key_input.clear();
+                            cfg_changed = true;
+                        }
+                        ui.add(
+                            egui::TextEdit::singleline(&mut st.api_key_input)
+                                .password(true)
+                                .hint_text("sk-…")
+                                .desired_width(150.0),
+                        );
+                    },
+                ) as usize;
+
+                shown += settings_row(ui, &search, &t("model", lang), &t("model_desc", lang), |ui| {
+                    if ui.add(egui::TextEdit::singleline(&mut cfg.api.model).desired_width(180.0)).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+
+                shown += settings_row(ui, &search, &t("session_budget", lang), &t("session_budget_desc", lang), |ui| {
+                    let mut budget = cfg.api.session_budget;
+                    if ui.add(egui::DragValue::new(&mut budget).speed(1000)).changed() {
+                        cfg.api.session_budget = budget;
+                        cfg_changed = true;
+                    }
+                }) as usize;
+            }
+            3 => {
+                shown += settings_row(ui, &search, &t("sandbox_timeout", lang), &t("sandbox_timeout_desc", lang), |ui| {
+                    if ui.add(egui::DragValue::new(&mut cfg.sandbox.timeout_seconds).range(1..=600)).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+
+                shown += settings_row(ui, &search, &t("max_retries", lang), &t("max_retries_desc", lang), |ui| {
+                    if ui.add(egui::DragValue::new(&mut cfg.sandbox.max_retries).range(0..=10)).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+            }
+            _ => {
+                ui.label(egui::RichText::new(t("mcp_servers_desc", lang)).size(13.0).color(TEXT_SECONDARY));
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("servers", lang)).size(17.0).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(format!("＋ {}", t("add_server", lang))).clicked() {
+                            st.status_message = if lang == "zh" {
+                                "請在 config.local.toml 的 [[mcp_servers]] 段新增伺服器定義".to_string()
+                            } else {
+                                "Add server entries under [[mcp_servers]] in config.local.toml".to_string()
+                            };
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+                if cfg.mcp_servers.is_empty() {
+                    ui.label(egui::RichText::new("—").color(TEXT_MUTED));
+                }
+                let mut servers = cfg.mcp_servers.clone();
+                for server in &mut servers {
+                    let name = server.name.clone();
+                    shown += settings_row(ui, &search, &name, &server.command.clone(), |ui| {
+                        if toggle_switch(ui, &mut server.enabled).changed() {
+                            cfg_changed = true;
+                        }
+                    }) as usize;
+                }
+                cfg.mcp_servers = servers;
+                if !st.status_message.is_empty() {
+                    ui.label(egui::RichText::new(&st.status_message).size(12.0).color(ACCENT_YELLOW));
+                }
+            }
+        }
+
+        if shown == 0 && !search.trim().is_empty() {
+            ui.label(egui::RichText::new(t("no_results", lang)).color(TEXT_MUTED));
+        }
+
+        if cfg_changed {
+            let _ = cfg.save();
+            *self.app_state.config.lock().unwrap() = cfg;
+        }
     }
 
     /// 側欄：對話歷史列表（點擊載入、🗑 刪除）。
@@ -713,6 +1170,14 @@ impl eframe::App for AgnesApp {
                 });
             });
 
+        // ── 設定頁（Codex 全頁式，接管選單列以下全部區域）────────────────────
+        let settings_open = self.ui_state.lock().unwrap().settings_open;
+        if settings_open {
+            self.render_settings_page(ctx, &lang);
+            self.qa_screenshot_hook(ctx);
+            return;
+        }
+
         // ── Left sidebar ──────────────────────────────────────────────────────
         egui::SidePanel::left("sidebar")
             .default_width(220.0)
@@ -1046,102 +1511,8 @@ impl eframe::App for AgnesApp {
             }
         });
 
-        // ── Settings Modal ────────────────────────────────────────────────────
-        let settings_open = self.ui_state.lock().unwrap().settings_open;
-        if settings_open {
-            let mut open_flag = true;
-            let mut settings_changed = false;
-
-            egui::Window::new(t("settings", &lang))
-                .default_size([520.0, 420.0])
-                .resizable(true)
-                .open(&mut open_flag)
-                .show(ctx, |ui| {
-                    let mut st = self.ui_state.lock().unwrap();
-
-                    // Tabs
-                    ui.horizontal(|ui| {
-                        for (i, key) in ["general", "permissions", "security"].iter().enumerate() {
-                            if ui.selectable_label(st.settings_tab == i, t(key, &lang)).clicked() {
-                                st.settings_tab = i;
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.add_space(8.0);
-
-                    match st.settings_tab {
-                        0 => {
-                            // General: language, work mode
-                            ui.strong(t("language", &lang));
-                            ui.horizontal(|ui| {
-                                if ui.selectable_label(st.language == "zh", "繁體中文 (zh-TW)").clicked() {
-                                    st.language = "zh".into();
-                                    settings_changed = true;
-                                }
-                                if ui.selectable_label(st.language == "en", "English (en-US)").clicked() {
-                                    st.language = "en".into();
-                                    settings_changed = true;
-                                }
-                            });
-                            ui.add_space(10.0);
-                            ui.strong(if lang == "zh" { "工作模式" } else { "Work Mode" });
-                            ui.horizontal(|ui| {
-                                if ui.selectable_label(st.work_mode == "project", t("work_mode_project", &lang)).clicked() {
-                                    st.work_mode = "project".into();
-                                    settings_changed = true;
-                                }
-                                if ui.selectable_label(st.work_mode == "global", t("work_mode_global", &lang)).clicked() {
-                                    st.work_mode = "global".into();
-                                    settings_changed = true;
-                                }
-                            });
-                        }
-                        1 => {
-                            // Permissions: shell selection
-                            let mut cfg = self.app_state.config.lock().unwrap().clone();
-                            ui.label(t("terminal_shell", &lang));
-                            ui.horizontal(|ui| {
-                                for shell in &["PowerShell", "cmd", "sh"] {
-                                    if ui.selectable_label(cfg.general.shell == *shell, *shell).clicked() {
-                                        cfg.general.shell = shell.to_string();
-                                        let _ = cfg.save();
-                                        *self.app_state.config.lock().unwrap() = cfg.clone();
-                                    }
-                                }
-                            });
-                        }
-                        2 => {
-                            // Security
-                            let mut cfg = self.app_state.config.lock().unwrap().clone();
-                            let mut changed = false;
-                            if ui.checkbox(&mut cfg.security.require_approval, t("auto_review", &lang)).changed() {
-                                changed = true;
-                            }
-                            if ui.checkbox(&mut cfg.security.full_access, t("full_access", &lang)).changed() {
-                                changed = true;
-                            }
-                            if changed {
-                                let _ = cfg.save();
-                                *self.app_state.config.lock().unwrap() = cfg;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    if settings_changed {
-                        let mut cfg = self.app_state.config.lock().unwrap().clone();
-                        cfg.general.language     = if st.language == "zh" { "zh-TW".into() } else { "en-US".into() };
-                        cfg.general.project_mode = st.work_mode.clone();
-                        let _ = cfg.save();
-                        *self.app_state.config.lock().unwrap() = cfg;
-                    }
-                });
-
-            if !open_flag {
-                self.ui_state.lock().unwrap().settings_open = false;
-            }
-        }
+        // ── QA 自我截圖鉤子 ───────────────────────────────────────────────────
+        self.qa_screenshot_hook(ctx);
     }
 }
 

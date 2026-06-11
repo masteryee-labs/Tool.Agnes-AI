@@ -12,6 +12,7 @@ mod validation;
 mod tests_integration;
 
 pub use config::Config;
+pub use config::key_persistence;
 pub use db::*;
 pub use locale::*;
 pub use sandbox::*;
