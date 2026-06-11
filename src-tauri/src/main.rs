@@ -1,4 +1,4 @@
-//! Agnes AI v0.4.0 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.5.0 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
 use std::sync::{Arc, Mutex};
@@ -127,6 +127,12 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("folders",             ("資料夾",                 "Folders")),
     ("welcome_global",      ("全域模式：需要我操作電腦做什麼？",
                              "Global mode — what should I do on this computer?")),
+    ("ui_scale",            ("介面縮放",               "UI Scale")),
+    ("ui_scale_desc",       ("整體介面與文字的放大倍率", "Magnification for the whole interface and text")),
+    ("panel_scope_global",  ("範疇：全域",             "Scope: Global")),
+    ("panel_scope_idle",    ("尚未執行審查",           "No audits yet")),
+    ("legend_agents",       ("✓ 通過　✗ 否決　~ 跳過　· 休眠",
+                             "✓ pass   ✗ reject   ~ skip   · dormant")),
 ];
 
 fn t_with(key: &str, lang: &str, arg: &str) -> String {
@@ -773,6 +779,22 @@ impl AgnesApp {
                             }
                         });
                 }) as usize;
+
+                shown += settings_row(ui, &search, &t("ui_scale", lang), &t("ui_scale_desc", lang), |ui| {
+                    let current = format!("{:.0}%", cfg.general.ui_scale * 100.0);
+                    egui::ComboBox::from_id_salt("ui_scale_combo")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for scale in [1.0_f32, 1.1, 1.25, 1.4, 1.5, 1.75] {
+                                let label = format!("{:.0}%", scale * 100.0);
+                                let selected = (cfg.general.ui_scale - scale).abs() < f32::EPSILON;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    cfg.general.ui_scale = scale;
+                                    cfg_changed = true;
+                                }
+                            }
+                        });
+                }) as usize;
             }
             1 => {
                 let mut default_perm = !cfg.security.full_access;
@@ -1043,15 +1065,21 @@ impl AgnesApp {
         }
     }
 
-    /// 載入指定對話進主畫面（點擊 Session 續聊——歷史從 SQLite 取回，可無縫接續）。
+    /// 載入指定對話進主畫面（點擊 Session 續聊——歷史與審查狀態從 SQLite 取回）。
     fn load_conversation(&self, st: &mut UiState, cid: &str) {
-        if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+        if let Ok(conn) = app_lib::open_connection(&self.app_state.db_path) {
             if let Ok(msgs) = app_lib::get_messages_for_conversation(&conn, cid) {
                 st.active_messages = msgs.into_iter()
                     .map(|m| ChatMessage { role: m.role, content: m.content })
                     .collect();
                 st.active_conversation_id = Some(cid.to_string());
             }
+            // 右側 22 代理人面板還原為該 Session 最後一輪審查
+            st.audit_results = app_lib::get_conversation_audits(&conn, cid)
+                .map(|rows| rows.into_iter().map(|(agent_name, verdict, reason)| AuditResult {
+                    agent_name, verdict, reason,
+                }).collect())
+                .unwrap_or_default();
         }
     }
 
@@ -1110,6 +1138,7 @@ impl AgnesApp {
                 if st.active_conversation_id.as_deref() == Some(cid.as_str()) {
                     st.active_conversation_id = None;
                     st.active_messages.clear();
+                    st.audit_results.clear();
                 }
                 if let Ok(convs) = app_lib::get_conversations(&conn) {
                     st.conversations = convs;
@@ -1143,6 +1172,7 @@ impl AgnesApp {
                         st.selected_paths.insert(path_str);
                         st.active_conversation_id = None;
                         st.active_messages.clear();
+                        st.audit_results.clear();
                     }
                 }
             }
@@ -1215,6 +1245,7 @@ impl AgnesApp {
                     }
                     st.active_conversation_id = None;
                     st.active_messages.clear();
+                    st.audit_results.clear();
                 }
             }
         });
@@ -1268,6 +1299,7 @@ impl AgnesApp {
                     ui.menu_button(egui::RichText::new("＋").size(17.0).strong(), |ui| {
                         if ui.button(format!("🗑 {}", t("clear_chat", lang))).clicked() {
                             st.active_messages.clear();
+                            st.audit_results.clear();
                             st.active_conversation_id = None;
                             ui.close_menu();
                             ui.ctx().request_repaint();
@@ -1493,7 +1525,7 @@ impl AgnesApp {
 
             match step_result {
                 Ok(step) if !aborted => {
-                    if let Ok(conn) = Connection::open(&app_state_task.db_path) {
+                    if let Ok(conn) = app_lib::open_connection(&app_state_task.db_path) {
                         let _ = app_lib::add_conversation_message(
                             &conn, &conversation_id, "assistant", &step.response_text,
                         );
@@ -1513,6 +1545,13 @@ impl AgnesApp {
                                 role:    "tool".into(),
                                 content: res.clone(),
                             });
+                        }
+                        // 審查結果按對話持久化——右側面板跟著 Session 走，切換可還原
+                        let rows: Vec<(String, String, String)> = step.audits.iter()
+                            .map(|a| (a.agent_name.clone(), a.verdict.clone(), a.reason.clone()))
+                            .collect();
+                        if let Err(e) = app_lib::replace_conversation_audits(&conn, &conversation_id, &rows) {
+                            eprintln!("[AUDIT] 持久化失敗（{} 筆）: {}", rows.len(), e);
                         }
                         st.audit_results = step.audits;
                     }
@@ -1546,7 +1585,10 @@ impl AgnesApp {
 impl eframe::App for AgnesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Style ─────────────────────────────────────────────────────────────
-        ctx.set_pixels_per_point(1.0);
+        // 介面縮放：使用者可調（先前強制 1.0 是高解析螢幕「字太小」的元兇）
+        let ui_scale = self.app_state.config.lock().unwrap().general.ui_scale
+            .clamp(app_lib::UI_SCALE_MIN, app_lib::UI_SCALE_MAX);
+        ctx.set_pixels_per_point(ui_scale);
         let mut style = (*ctx.style()).clone();
         // 全域字級拉高：egui 預設 Body/Button 12.5、Small 9——桌面高解析下過小
         style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(FONT_HEADING));
@@ -1678,6 +1720,7 @@ impl eframe::App for AgnesApp {
                                 let mut st = self.ui_state.lock().unwrap();
                                 st.active_conversation_id = None;
                                 st.active_messages.clear();
+                                st.audit_results.clear();
                                 ui.close_menu();
                             }
                             if ui.button(format!("⚙ {}", t("settings", &lang))).clicked() {
@@ -1741,6 +1784,7 @@ impl eframe::App for AgnesApp {
                     st.work_mode = if tab_idx == 1 { "global".into() } else { "project".into() };
                     st.active_conversation_id = None;
                     st.active_messages.clear();
+                    st.audit_results.clear();
                     let mut cfg = self.app_state.config.lock().unwrap().clone();
                     cfg.general.project_mode = st.work_mode.clone();
                     let _ = cfg.save();
@@ -1760,6 +1804,7 @@ impl eframe::App for AgnesApp {
                 if ui.add(new_conv_btn).clicked() {
                     st.active_conversation_id = None;
                     st.active_messages.clear();
+                    st.audit_results.clear();
                 }
 
                 ui.add_space(8.0);
@@ -1801,6 +1846,32 @@ impl eframe::App for AgnesApp {
                 );
 
                 ui.label(egui::RichText::new(format!("🤖 {}", t("agent_status", &lang))).size(14.5).color(TEXT_PRIMARY).strong());
+
+                // 範疇副標：面板狀態跟著目前 Session/專案走
+                let (scope_text, scope_color) = {
+                    let st = self.ui_state.lock().unwrap();
+                    if st.work_mode == "global" {
+                        (t("panel_scope_global", &lang), ACCENT_ORANGE)
+                    } else {
+                        let project = st.selected_project_idx
+                            .and_then(|i| st.projects.get(i))
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default();
+                        let session = st.active_conversation_id.as_deref()
+                            .and_then(|cid| st.conversations.iter().find(|c| c.id == cid))
+                            .map(|c| truncate_chars(&c.title, 10));
+                        match session {
+                            Some(s) => (format!("📂 {} / 💬 {}", project, s), ACCENT_BLUE),
+                            None => (format!("📂 {}", project), TEXT_SECONDARY),
+                        }
+                    }
+                };
+                ui.label(egui::RichText::new(scope_text).size(12.0).color(scope_color));
+                let has_audits = !self.ui_state.lock().unwrap().audit_results.is_empty();
+                ui.label(
+                    egui::RichText::new(if has_audits { t("legend_agents", &lang) } else { t("panel_scope_idle", &lang) })
+                        .size(11.5).color(TEXT_MUTED),
+                );
                 ui.add_space(6.0);
 
                 let groups: &[(&str, &[&str])] = &[
@@ -1819,18 +1890,25 @@ impl eframe::App for AgnesApp {
                         ui.add_space(2.0);
                         ui.label(egui::RichText::new(*g_name).color(ACCENT_BLUE).strong().size(13.0));
                         for a in *agents {
-                            let (status_color, status_text) = match audits.iter().find(|x| x.agent_name == *a) {
-                                Some(r) if r.verdict == "PASSED"   => (ACCENT_GREEN,  "✓"),
-                                Some(r) if r.verdict == "REJECTED" => (ACCENT_RED,    "✗"),
-                                Some(r) if r.verdict == "SKIPPED"  => (TEXT_SECONDARY, "~"),
-                                _ => (TEXT_MUTED, "·"),
+                            let audit = audits.iter().find(|x| x.agent_name == *a);
+                            let (status_color, status_text, name_color) = match audit {
+                                Some(r) if r.verdict == "PASSED"   => (ACCENT_GREEN,  "✓", TEXT_PRIMARY),
+                                Some(r) if r.verdict == "REJECTED" => (ACCENT_RED,    "✗", ACCENT_RED),
+                                Some(r) if r.verdict == "SKIPPED"  => (TEXT_SECONDARY, "~", TEXT_SECONDARY),
+                                // DORMANT：按路由休眠（未激活 = 零成本），名稱同步轉灰
+                                Some(_) => (TEXT_MUTED, "·", TEXT_MUTED),
+                                None    => (TEXT_MUTED, "·", TEXT_PRIMARY),
                             };
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("  {}", a)).size(12.5).color(TEXT_PRIMARY));
+                            let row = ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(format!("  {}", a)).size(12.5).color(name_color));
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                     ui.label(egui::RichText::new(status_text).color(status_color).size(13.0));
                                 });
                             });
+                            // hover 顯示該代理本輪裁決原因（07_UI_SPEC：點代理看 gate 結果）
+                            if let Some(r) = audit {
+                                row.response.on_hover_text(&r.reason);
+                            }
                         }
                         ui.add_space(3.0);
                     }
@@ -2269,7 +2347,7 @@ fn main() {
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([800.0, 500.0])
             .with_decorations(true)
-            .with_title("Agnes AI v0.4.0 — Multi Agent Security Engine"),
+            .with_title("Agnes AI v0.5.0 — Multi Agent Security Engine"),
         ..Default::default()
     };
 

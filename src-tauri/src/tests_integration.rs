@@ -381,6 +381,36 @@ fn test_db_audit_log() {
     let _ = std::fs::remove_file(&db_path);
 }
 
+#[test]
+fn test_db_conversation_audits_roundtrip() {
+    // 回歸：rusqlite bundled 預設啟用外鍵——對話審查若寫進 audit_logs（task_id 外鍵
+    // 指向 tasks）必以 FOREIGN KEY constraint 失敗。conversation_audits 無外鍵，
+    // 對話 id 不需存在於 tasks 表即可寫讀（GUI 實機 QA 抓到的缺陷場景）。
+    let db_path = std::env::temp_dir().join("agnes_test_conv_audits.db");
+    let _ = std::fs::remove_file(&db_path);
+
+    let conn = crate::open_connection(&db_path).unwrap();
+    let conv_id = crate::create_conversation(&conn, "審查持久化測試", None).unwrap();
+
+    let batch1 = vec![
+        ("WorkflowTopology".to_string(), "PASSED".to_string(), "審查通過".to_string()),
+        ("SandboxRuntimeTester".to_string(), "DORMANT".to_string(), "休眠：無 Rust 代碼寫入".to_string()),
+    ];
+    crate::replace_conversation_audits(&conn, &conv_id, &batch1).unwrap();
+    let read1 = crate::get_conversation_audits(&conn, &conv_id).unwrap();
+    assert_eq!(read1, batch1);
+
+    // 取代式：第二輪寫入後只留最新批次
+    let batch2 = vec![
+        ("OrchestratorAgent".to_string(), "REJECTED".to_string(), "[REJECT: G22]".to_string()),
+    ];
+    crate::replace_conversation_audits(&conn, &conv_id, &batch2).unwrap();
+    let read2 = crate::get_conversation_audits(&conn, &conv_id).unwrap();
+    assert_eq!(read2, batch2);
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
 // ─── 11. Exit Code 對齊 ───────────────────────────────────────────────────────
 
 #[test]

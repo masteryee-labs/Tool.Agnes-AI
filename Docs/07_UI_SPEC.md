@@ -12,6 +12,8 @@
 - **全域字級**：egui text_styles 拉高（Body 16 / Button 15.5 / Mono 14.5 / Small 13），右側代理人面板與各小字同步放大
 - **MCP 設定**：「＋ 新增伺服器」為真表單（名稱/指令/引數 → 寫入 config 並立即啟動）；伺服器 toggle 即時 start/stop；🗑 刪除；工作區 `.mcp.json`（Claude 格式）唯讀列出；App 啟動時自動啟動 config + .mcp.json 全部啟用伺服器
 - **技能設定區**：列出工作區 `.claude/skills/*/SKILL.md`（Claude 格式），對話以 `/名稱` 呼叫
+- **介面縮放**（v0.5.0）：`config.general.ui_scale`（預設 1.25，範圍 1.0–1.75），設定→一般→介面縮放下拉即時生效；先前強制 `pixels_per_point=1.0` 是高解析螢幕字太小的根因
+- **22 代理人面板跟隨 Session**（v0.5.0）：副標顯示目前範疇（📂 專案 / 💬 Session 或「範疇：全域」）；每輪審查以取代式寫入 `conversation_audits` 表（不可用 audit_logs——其 task_id 外鍵在 rusqlite bundled 預設啟用 FK 下會拒絕對話 id），點擊 Session 即還原該輪狀態；圖例：✓ 通過、✗ 否決、~ 跳過、· 休眠（灰名稱）；hover 列顯示該代理裁決原因
 
 ## 版面結構
 
