@@ -114,9 +114,10 @@ impl Gate for SlopVibeAuditorGate {
     fn name(&self) -> &'static str { "SlopVibeAuditor" }
     fn gate_id(&self) -> &'static str { "G3" }
     fn check(&self, change: &ProposedChange) -> GateResult {
+        // 標準 AI 空話清單（與 .agent/rules/core.agents.toon 的 banned_words 一致，無重複）
         let slop_words = [
             "delve", "testament", "underscore", "crucial", "furthermore",
-            "robust", "realm", "tapestry", "embark", "intricate"
+            "pivotal", "moreover", "robust", "realm", "tapestry", "embark", "intricate",
         ];
         for (mi, msg) in change.messages.iter().enumerate() {
             if let Some(role) = msg["role"].as_str() {
