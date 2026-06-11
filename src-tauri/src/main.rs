@@ -1,33 +1,16 @@
-//! Agnes AI v0.5.0 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.6.0 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
+
+mod ui_chat;
+mod ui_panels;
+mod ui_theme;
 
 use std::sync::{Arc, Mutex};
 use eframe::egui;
 use rusqlite::Connection;
 use app_lib::{AppState, Config, AgentLoop, AgentExecutionState, AuditResult, PendingState};
-
-// ─── Color Palette (Codex/Antigravity dark theme) ───────────────────────────
-const BG_PRIMARY:   egui::Color32 = egui::Color32::from_rgb(18,  18,  18);
-const BG_SECONDARY: egui::Color32 = egui::Color32::from_rgb(30,  30,  30);
-const BG_TERTIARY:  egui::Color32 = egui::Color32::from_rgb(40,  40,  40);
-const BG_HOVER:     egui::Color32 = egui::Color32::from_rgb(50,  50,  50);
-const BG_CARD:      egui::Color32 = egui::Color32::from_rgb(35,  35,  35);
-const BORDER:       egui::Color32 = egui::Color32::from_rgb(60,  60,  60);
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(230, 230, 230);
-const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(160, 160, 160);
-const TEXT_MUTED:   egui::Color32 = egui::Color32::from_rgb(100, 100, 100);
-const ACCENT_BLUE:  egui::Color32 = egui::Color32::from_rgb(80,  140, 255);
-const ACCENT_ORANGE:egui::Color32 = egui::Color32::from_rgb(255, 170, 60);
-const ACCENT_GREEN: egui::Color32 = egui::Color32::from_rgb(80,  200, 120);
-const ACCENT_RED:   egui::Color32 = egui::Color32::from_rgb(255, 80,  80);
-const ACCENT_YELLOW:egui::Color32 = egui::Color32::from_rgb(255, 220, 60);
-
-// ─── 全域字級（使用者回饋：預設字太小）──────────────────────────────────────
-const FONT_HEADING: f32 = 24.0;
-const FONT_BODY:    f32 = 16.0;
-const FONT_BUTTON:  f32 = 15.5;
-const FONT_SMALL:   f32 = 13.0;
-const FONT_MONO:    f32 = 14.5;
+use ui_chat::ChatAction;
+use ui_theme::*;
 
 // ─── i18n ────────────────────────────────────────────────────────────────────
 
@@ -133,6 +116,39 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("panel_scope_idle",    ("尚未執行審查",           "No audits yet")),
     ("legend_agents",       ("✓ 通過　✗ 否決　~ 跳過　· 休眠",
                              "✓ pass   ✗ reject   ~ skip   · dormant")),
+    // ── 訊息流（ui_chat）──
+    ("lines_n",             ("（{} 行）",               "({} lines)")),
+    ("thinking_lines",      ("思考過程（{} 行）",        "Thinking ({} lines)")),
+    ("act_run",             ("執行指令",               "Run command")),
+    ("act_write",           ("寫入",                   "Write")),
+    ("act_read",            ("讀取",                   "Read")),
+    ("act_mcp",             ("MCP",                    "MCP")),
+    ("open_file",           ("開啟檔案",               "Open file")),
+    ("result_label",        ("結果",                   "Result")),
+    ("code_block",          ("程式碼",                 "Code")),
+    ("tool_output",         ("執行結果",               "Tool output")),
+    ("actions_ran",         ("執行了 {} 個動作",        "Ran {} actions")),
+    // ── 右側面板（ui_panels）──
+    ("tab_agents",          ("代理人",                 "Agents")),
+    ("tab_changes",         ("變更",                   "Changes")),
+    ("tab_file",            ("檔案",                   "File")),
+    ("no_changes",          ("本次對話尚無檔案變更",     "No file changes in this session")),
+    ("view_diff",           ("差異",                   "Diff")),
+    ("view_full",           ("全文",                   "Full")),
+    ("file_tab_hint",       ("點擊訊息流的讀寫活動列或變更標籤即可開啟檔案",
+                             "Click a read/write row or a change chip to open a file")),
+    ("file_too_large",      ("檔案過大（>{} KB），不顯示內容",
+                             "File too large (>{} KB), content hidden")),
+    // ── 頂列 / 側欄 / 輸入卡 ──
+    ("breadcrumb_new",      ("新對話",                 "New chat")),
+    ("recent",              ("最近",                   "Recent")),
+    ("toggle_panel",        ("右側面板",               "Right panel")),
+    ("input_hint",          ("輸入訊息…（/ 技能，Ctrl+Enter 送出）",
+                             "Type a message… (/ for skills, Ctrl+Enter to send)")),
+    ("time_just_now",       ("剛剛",                   "just now")),
+    ("time_min_ago",        ("{} 分鐘前",              "{} min ago")),
+    ("time_hr_ago",         ("{} 小時前",              "{} hr ago")),
+    ("time_day_ago",        ("{} 天前",                "{} d ago")),
 ];
 
 fn t_with(key: &str, lang: &str, arg: &str) -> String {
@@ -156,6 +172,26 @@ fn t(key: &str, lang: &str) -> String {
 fn t_fmt(key: &str, lang: &str, n: usize) -> String {
     let tmpl = t(key, lang);
     tmpl.replace("{}", &n.to_string())
+}
+
+/// SQLite CURRENT_TIMESTAMP（UTC，"YYYY-MM-DD HH:MM:SS"）→「N 分鐘前」相對時間。
+/// 解析失敗時原樣回傳（舊資料防呆）。
+fn relative_time(ts: &str, lang: &str) -> String {
+    use chrono::{NaiveDateTime, TimeZone, Utc};
+    let Ok(naive) = NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S") else {
+        return ts.to_string();
+    };
+    let then = Utc.from_utc_datetime(&naive);
+    let mins = (Utc::now() - then).num_minutes().max(0);
+    if mins < 1 {
+        t("time_just_now", lang)
+    } else if mins < 60 {
+        t_fmt("time_min_ago", lang, mins as usize)
+    } else if mins < 60 * 24 {
+        t_fmt("time_hr_ago", lang, (mins / 60) as usize)
+    } else {
+        t_fmt("time_day_ago", lang, (mins / (60 * 24)) as usize)
+    }
 }
 
 // ─── Data Types ──────────────────────────────────────────────────────────────
@@ -202,6 +238,31 @@ struct UiState {
     status_message: String,
     // Sidebar tab: 0 = 專案, 1 = 全域
     sidebar_tab: usize,
+    // 右側面板：0 代理人 | 1 變更 | 2 檔案
+    right_panel_tab: usize,
+    right_panel_open: bool,
+    // 檔案變更（session 載入或每輪完成後刷新一次，嚴禁每幀查 DB）
+    file_changes: Vec<app_lib::FileChangeRecord>,
+    diff_stats_cache: std::collections::HashMap<i64, (usize, usize)>,
+    selected_change_id: Option<i64>,
+    diff_rows: Vec<ui_panels::DiffRowView>,
+    diff_full_view: bool,
+    // 檔案唯讀檢視器（點擊當幀讀一次並快取）
+    file_viewer_path: Option<String>,
+    file_viewer_content: Option<Result<String, String>>,
+}
+
+impl UiState {
+    /// 切換 Session / 專案 / 範疇時，清空跟著對話走的狀態。
+    fn reset_session(&mut self) {
+        self.active_conversation_id = None;
+        self.active_messages.clear();
+        self.audit_results.clear();
+        self.file_changes.clear();
+        self.diff_stats_cache.clear();
+        self.selected_change_id = None;
+        self.diff_rows.clear();
+    }
 }
 
 impl Default for UiState {
@@ -228,6 +289,15 @@ impl Default for UiState {
             audit_results: Vec::new(),
             status_message: String::new(),
             sidebar_tab:   0,
+            right_panel_tab: 0,
+            right_panel_open: true,
+            file_changes: Vec::new(),
+            diff_stats_cache: std::collections::HashMap::new(),
+            selected_change_id: None,
+            diff_rows: Vec::new(),
+            diff_full_view: false,
+            file_viewer_path: None,
+            file_viewer_content: None,
         }
     }
 }
@@ -307,11 +377,7 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     }
     let rect = response.rect;
     let how_on = ui.ctx().animate_bool(response.id, *on);
-    let bg = egui::Color32::from_rgb(
-        (60.0 + how_on * (43.0 - 60.0)) as u8,
-        (60.0 + how_on * (134.0 - 60.0)) as u8,
-        (60.0 + how_on * (255.0 - 60.0)) as u8,
-    );
+    let bg = ui_theme::lerp_color(BORDER, ACCENT_ORANGE, how_on);
     let radius = rect.height() / 2.0;
     ui.painter().rect_filled(rect, radius, bg);
     let knob_x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
@@ -325,7 +391,7 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
 
 /// 設定導航項：以 Button 為基底的可選擇列（selectable_label 在此面板收不到點擊）。
 fn nav_item(ui: &mut egui::Ui, selected: bool, label: String) -> egui::Response {
-    let fill = if selected { egui::Color32::from_rgb(40, 60, 100) } else { egui::Color32::TRANSPARENT };
+    let fill = if selected { BG_HOVER } else { egui::Color32::TRANSPARENT };
     ui.add_sized(
         egui::vec2(ui.available_width(), 26.0),
         egui::Button::new(egui::RichText::new(label).size(14.5)).fill(fill).corner_radius(6),
@@ -445,6 +511,7 @@ impl AgnesApp {
             };
             st.work_mode = config_lock.general.project_mode.clone();
             st.sidebar_tab = if st.work_mode == "global" { 1 } else { 0 };
+            st.right_panel_open = config_lock.general.right_panel_open_default;
         }
 
         // 啟動 MCP 伺服器：config.local.toml 啟用項 + 各專案資料夾的 .mcp.json（Claude 格式）。
@@ -483,7 +550,11 @@ impl AgnesApp {
             match std::env::var("AGNES_QA_VIEW").as_deref() {
                 Ok("settings") => st.settings_open = true,
                 // 舊名 history 保留為全域 Tab 的別名（qa_runner 相容）
-                Ok("global") | Ok("history") => st.sidebar_tab = 1,
+                // 與實際點擊行為一致：切 Tab 同時切 work_mode（麵包屑/徽章跟著走）
+                Ok("global") | Ok("history") => {
+                    st.sidebar_tab = 1;
+                    st.work_mode = "global".to_string();
+                }
                 Ok("chat") => {
                     // 載入最近一筆對話以渲染訊息流（驗證氣泡/碼塊/工具輸出樣式）
                     if let Some(conv) = st.conversations.first().cloned() {
@@ -492,6 +563,9 @@ impl AgnesApp {
                                 st.active_messages = msgs.into_iter()
                                     .map(|m| ChatMessage { role: m.role, content: m.content })
                                     .collect();
+                                st.file_changes =
+                                    app_lib::get_file_changes(&app_state.db_path, &conv.id)
+                                        .unwrap_or_default();
                                 st.active_conversation_id = Some(conv.id);
                             }
                         }
@@ -1081,6 +1155,86 @@ impl AgnesApp {
                 }).collect())
                 .unwrap_or_default();
         }
+        // 變更面板跟著 Session 走：載入時讀一次（之後僅在每輪完成 / 審批後刷新）
+        st.file_changes = app_lib::get_file_changes(&self.app_state.db_path, cid)
+            .unwrap_or_default();
+        st.diff_stats_cache.clear();
+        st.selected_change_id = None;
+        st.diff_rows.clear();
+    }
+
+    /// 刪除 Session 並刷新清單；刪到目前對話時順帶清空主畫面。
+    fn delete_conversation_and_refresh(&self, st: &mut UiState, cid: &str) {
+        if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+            let _ = app_lib::delete_conversation(&conn, cid);
+            if st.active_conversation_id.as_deref() == Some(cid) {
+                st.reset_session();
+            }
+            if let Ok(convs) = app_lib::get_conversations(&conn) {
+                st.conversations = convs;
+            }
+        }
+    }
+
+    /// 側欄「最近」：目前範疇（專案 / 全域）最新 N 筆 Session 扁平列。
+    /// 右端平時顯示相對時間，hover 換成 🗑 刪除。
+    fn render_recent_rows(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) {
+        let filter = if st.sidebar_tab == 1 {
+            Some(app_lib::GLOBAL_PROJECT_ID.to_string())
+        } else {
+            st.selected_project_idx
+                .and_then(|i| st.projects.get(i))
+                .map(|p| p.id.clone())
+        };
+        let Some(filter) = filter else { return };
+        // get_conversations 以 updated_at DESC 排序——直接取前 N 筆即為最新
+        let recent: Vec<app_lib::ConversationSummary> = st.conversations.iter()
+            .filter(|c| c.project_id.as_deref() == Some(filter.as_str()))
+            .take(RECENT_SESSIONS_MAX)
+            .cloned()
+            .collect();
+        if recent.is_empty() {
+            return;
+        }
+        ui.label(egui::RichText::new(t("recent", lang)).size(FONT_CAPTION).color(TEXT_MUTED));
+        ui.add_space(SPACING_XS);
+
+        let mut to_delete: Option<String> = None;
+        for conv in &recent {
+            // 先以估算列高判定 hover，再渲染（immediate mode 下無法後驗）
+            let row_rect = egui::Rect::from_min_size(
+                egui::pos2(ui.min_rect().left(), ui.cursor().min.y),
+                egui::vec2(ui.available_width(), RECENT_ROW_HEIGHT),
+            );
+            let hovered = ui.rect_contains_pointer(row_rect);
+            ui.horizontal(|ui| {
+                let selected = st.active_conversation_id.as_deref() == Some(conv.id.as_str());
+                let untitled = t("untitled", lang);
+                let title = if conv.title.trim().is_empty() { untitled.as_str() } else { conv.title.as_str() };
+                if ui.selectable_label(
+                    selected,
+                    egui::RichText::new(format!("💬 {}", truncate_chars(title, 12))).size(FONT_SMALL),
+                ).on_hover_text(&conv.updated_at).clicked() {
+                    self.load_conversation(st, &conv.id);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if hovered {
+                        if ui.small_button("🗑").clicked() {
+                            to_delete = Some(conv.id.clone());
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new(relative_time(&conv.updated_at, lang))
+                                .size(FONT_CAPTION)
+                                .color(TEXT_MUTED),
+                        );
+                    }
+                });
+            });
+        }
+        if let Some(cid) = to_delete {
+            self.delete_conversation_and_refresh(st, &cid);
+        }
     }
 
     /// Session 列：點擊載入續聊、🗑 刪除。`filter` 為 project_id 過濾值；
@@ -1133,17 +1287,7 @@ impl AgnesApp {
         }
 
         if let Some(cid) = to_delete {
-            if let Ok(conn) = Connection::open(&self.app_state.db_path) {
-                let _ = app_lib::delete_conversation(&conn, &cid);
-                if st.active_conversation_id.as_deref() == Some(cid.as_str()) {
-                    st.active_conversation_id = None;
-                    st.active_messages.clear();
-                    st.audit_results.clear();
-                }
-                if let Ok(convs) = app_lib::get_conversations(&conn) {
-                    st.conversations = convs;
-                }
-            }
+            self.delete_conversation_and_refresh(st, &cid);
         }
     }
 
@@ -1170,9 +1314,7 @@ impl AgnesApp {
                         st.selected_project_idx = Some(st.projects.len() - 1);
                         st.selected_paths.clear();
                         st.selected_paths.insert(path_str);
-                        st.active_conversation_id = None;
-                        st.active_messages.clear();
-                        st.audit_results.clear();
+                        st.reset_session();
                     }
                 }
             }
@@ -1243,9 +1385,7 @@ impl AgnesApp {
                     for path in &p.paths {
                         st.selected_paths.insert(path.clone());
                     }
-                    st.active_conversation_id = None;
-                    st.active_messages.clear();
-                    st.audit_results.clear();
+                    st.reset_session();
                 }
             }
         });
@@ -1277,30 +1417,28 @@ impl AgnesApp {
         let model_name = self.app_state.config.lock().unwrap().api.model.clone();
 
         egui::Frame::default()
-            .fill(BG_SECONDARY)
+            .fill(BG_CARD)
             .stroke(egui::Stroke::new(1.0, BORDER))
-            .corner_radius(12)
-            .inner_margin(12.0)
+            .corner_radius(RADIUS_INPUT)
+            .inner_margin(SPACING_CARD_INNER)
             .show(ui, |ui| {
                 // 多行輸入區
                 let text_edit = egui::TextEdit::multiline(&mut st.chat_input)
                     .desired_width(f32::INFINITY)
                     .desired_rows(2)
-                    .hint_text(t("ask_placeholder", lang))
+                    .hint_text(t("input_hint", lang))
                     .interactive(!is_running)
                     .frame(false);
                 let response = ui.add(text_edit);
 
-                ui.add_space(8.0);
+                ui.add_space(SPACING_SM);
 
                 // 工具列
                 ui.horizontal(|ui| {
                     // ＋ 選單
                     ui.menu_button(egui::RichText::new("＋").size(17.0).strong(), |ui| {
                         if ui.button(format!("🗑 {}", t("clear_chat", lang))).clicked() {
-                            st.active_messages.clear();
-                            st.audit_results.clear();
-                            st.active_conversation_id = None;
+                            st.reset_session();
                             ui.close_menu();
                             ui.ctx().request_repaint();
                         }
@@ -1380,13 +1518,12 @@ impl AgnesApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if is_running {
                             let abort_btn = egui::Button::new(
-                                egui::RichText::new(format!("■ {}", t("abort", lang)))
-                                    .color(TEXT_PRIMARY).strong().size(14.0),
+                                egui::RichText::new("⏹").color(TEXT_PRIMARY).strong().size(16.0),
                             )
                             .fill(ACCENT_RED)
-                            .corner_radius(14)
-                            .min_size(egui::Vec2::new(64.0, 30.0));
-                            if ui.add(abort_btn).clicked() {
+                            .corner_radius(RADIUS_BADGE)
+                            .min_size(egui::Vec2::splat(SEND_BTN_SIZE));
+                            if ui.add(abort_btn).on_hover_text(t("abort", lang)).clicked() {
                                 if let Ok(mut s) = self.app_state.agent_state.try_lock() {
                                     *s = AgentExecutionState::Idle;
                                 }
@@ -1396,9 +1533,9 @@ impl AgnesApp {
                             let send_btn = egui::Button::new(
                                 egui::RichText::new("↑").color(TEXT_PRIMARY).strong().size(16.0),
                             )
-                            .fill(ACCENT_BLUE)
-                            .corner_radius(15)
-                            .min_size(egui::Vec2::new(30.0, 30.0));
+                            .fill(ACCENT_ORANGE)
+                            .corner_radius(RADIUS_BADGE)
+                            .min_size(egui::Vec2::splat(SEND_BTN_SIZE));
                             let clicked = ui.add(send_btn).clicked();
 
                             let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1499,7 +1636,9 @@ impl AgnesApp {
                 *s = AgentExecutionState::Running(std::time::Instant::now());
             }
 
-            let agent_loop = AgentLoop::new(config.lock().unwrap().clone(), workspace_path);
+            let mut agent_loop = AgentLoop::new(config.lock().unwrap().clone(), workspace_path);
+            // 寫檔自動記入 file_changes（變更面板資料來源）
+            agent_loop.set_conversation_id(&conversation_id);
             let mut messages = Vec::new();
 
             if let Ok(conn) = Connection::open(&app_state_task.db_path) {
@@ -1554,6 +1693,10 @@ impl AgnesApp {
                             eprintln!("[AUDIT] 持久化失敗（{} 筆）: {}", rows.len(), e);
                         }
                         st.audit_results = step.audits;
+                        // 本輪寫檔後刷新變更清單（一輪一次，非每幀）
+                        st.file_changes =
+                            app_lib::get_file_changes(&app_state_task.db_path, &conversation_id)
+                                .unwrap_or_default();
                     }
                     if step.requires_approval {
                         let mut pending = app_state_task.pending_state.lock().await;
@@ -1586,30 +1729,17 @@ impl eframe::App for AgnesApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── Style ─────────────────────────────────────────────────────────────
         // 介面縮放：使用者可調（先前強制 1.0 是高解析螢幕「字太小」的元兇）
-        let ui_scale = self.app_state.config.lock().unwrap().general.ui_scale
-            .clamp(app_lib::UI_SCALE_MIN, app_lib::UI_SCALE_MAX);
+        // 主題與字級統一由 ui_theme::apply_theme 套用。
+        let (ui_scale, diff_max_lines, viewer_max_bytes) = {
+            let cfg = self.app_state.config.lock().unwrap();
+            (
+                cfg.general.ui_scale.clamp(app_lib::UI_SCALE_MIN, app_lib::UI_SCALE_MAX),
+                cfg.general.diff_view_max_lines,
+                cfg.general.file_viewer_max_bytes,
+            )
+        };
         ctx.set_pixels_per_point(ui_scale);
-        let mut style = (*ctx.style()).clone();
-        // 全域字級拉高：egui 預設 Body/Button 12.5、Small 9——桌面高解析下過小
-        style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(FONT_HEADING));
-        style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(FONT_BODY));
-        style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(FONT_BUTTON));
-        style.text_styles.insert(egui::TextStyle::Small, egui::FontId::proportional(FONT_SMALL));
-        style.text_styles.insert(egui::TextStyle::Monospace, egui::FontId::monospace(FONT_MONO));
-        style.visuals.dark_mode = true;
-        style.visuals.extreme_bg_color        = BG_PRIMARY;
-        style.visuals.window_fill             = BG_SECONDARY;
-        style.visuals.panel_fill              = BG_SECONDARY;
-        style.visuals.window_stroke           = egui::Stroke::new(1.0, BORDER);
-        style.visuals.widgets.inactive.bg_fill     = BG_SECONDARY;
-        style.visuals.widgets.inactive.fg_stroke   = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.hovered.bg_fill      = BG_HOVER;
-        style.visuals.widgets.hovered.fg_stroke    = egui::Stroke::new(1.0, TEXT_PRIMARY);
-        style.visuals.widgets.active.bg_fill       = BG_HOVER;
-        style.visuals.widgets.noninteractive.bg_fill = BG_SECONDARY;
-        style.visuals.selection.bg_fill            = ACCENT_BLUE;
-        style.visuals.override_text_color          = Some(TEXT_PRIMARY);
-        ctx.set_style(style);
+        ui_theme::apply_theme(ctx);
 
         let lang = self.ui_state.lock().unwrap().language.clone();
 
@@ -1630,66 +1760,113 @@ impl eframe::App for AgnesApp {
             }
         };
 
-        // ── Top menu bar ──────────────────────────────────────────────────────
+        // ── Top bar：左麵包屑（範疇 / Session）＋右叢集（▤、Token、⚙、選單）──
         egui::TopBottomPanel::top("menu_bar")
-            .exact_height(36.0)
+            .exact_height(TOPBAR_HEIGHT)
+            .frame(
+                egui::Frame::default()
+                    .fill(BG_SIDEBAR)
+                    .inner_margin(egui::Margin::symmetric(8, 4)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing = egui::Vec2::new(10.0, 0.0);
-                    ui.label(
-                        egui::RichText::new("Agnes AI")
-                            .size(16.0).color(ACCENT_BLUE).strong(),
-                    );
-                    ui.separator();
+                    ui.spacing_mut().item_spacing = egui::Vec2::new(SPACING_SM + 2.0, 0.0);
 
-                    // Language toggle in title bar
-                    let lang_btn = if lang == "zh" { "EN" } else { "中" };
-                    if ui.small_button(lang_btn).on_hover_text(t("language", &lang)).clicked() {
-                        let mut st = self.ui_state.lock().unwrap();
-                        st.language = if st.language == "zh" { "en".into() } else { "zh".into() };
-                        let mut cfg = self.app_state.config.lock().unwrap().clone();
-                        cfg.general.language = if st.language == "zh" { "zh-TW".into() } else { "en-US".into() };
-                        let _ = cfg.save();
-                        *self.app_state.config.lock().unwrap() = cfg;
-                    }
-                    ui.separator();
-
-                    // Token budget bar
-                    let budget_color = if budget_ratio >= 1.0 {
-                        ACCENT_RED
-                    } else if budget_ratio >= 0.8 {
-                        ACCENT_YELLOW
-                    } else {
-                        ACCENT_GREEN
+                    // 麵包屑：📁 {專案名|全域} / {Session 標題或「新對話」}
+                    let (scope_icon, scope_name, session_title) = {
+                        let st = self.ui_state.lock().unwrap();
+                        let (icon, name) = if st.work_mode == "global" {
+                            ("🌍", t("tab_global", &lang))
+                        } else {
+                            (
+                                "📁",
+                                st.selected_project_idx
+                                    .and_then(|i| st.projects.get(i))
+                                    .map(|p| p.name.clone())
+                                    .unwrap_or_else(|| t("projects", &lang)),
+                            )
+                        };
+                        let session = st.active_conversation_id.as_deref()
+                            .and_then(|cid| st.conversations.iter().find(|c| c.id == cid))
+                            .map(|c| truncate_chars(&c.title, 16))
+                            .unwrap_or_else(|| t("breadcrumb_new", &lang));
+                        (icon, name, session)
                     };
-
                     ui.label(
-                        egui::RichText::new(t("token_budget", &lang))
-                            .size(13.0).color(TEXT_SECONDARY),
+                        egui::RichText::new(format!("{} {}", scope_icon, scope_name))
+                            .size(FONT_LABEL).color(TEXT_SECONDARY),
                     );
-                    let bar_rect = ui.allocate_space(egui::Vec2::new(80.0, 10.0)).1;
-                    ui.painter().rect_filled(bar_rect, 3.0, BG_TERTIARY);
-                    let fill_w = bar_rect.width() * (budget_ratio as f32).min(1.0);
-                    ui.painter().rect_filled(
-                        egui::Rect::from_min_size(bar_rect.min, egui::Vec2::new(fill_w, bar_rect.height())),
-                        3.0,
-                        budget_color,
-                    );
+                    ui.label(egui::RichText::new("/").size(FONT_LABEL).color(TEXT_MUTED));
                     ui.label(
-                        egui::RichText::new(format!("{}/{}", spent, budget_total))
-                            .size(12.0).color(TEXT_MUTED),
+                        egui::RichText::new(session_title)
+                            .size(FONT_LABEL).color(TEXT_PRIMARY).strong(),
                     );
-                    if ui.small_button("↻")
-                        .on_hover_text(if lang == "zh" { "重設 Token 計數" } else { "Reset token counter" })
-                        .clicked()
-                    {
-                        if let Ok(mut b) = self.app_state.token_budgeter.try_lock() {
-                            b.spent_prompt = 0;
-                            b.spent_completion = 0;
-                        }
-                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // ⚙ 設定（最右）
+                        if ui.small_button("⚙").on_hover_text(t("settings", &lang)).clicked() {
+                            self.ui_state.lock().unwrap().settings_open = true;
+                        }
+
+                        // Token 預算條
+                        let budget_color = if budget_ratio >= 1.0 {
+                            ACCENT_RED
+                        } else if budget_ratio >= 0.8 {
+                            ACCENT_YELLOW
+                        } else {
+                            ACCENT_GREEN
+                        };
+                        if ui.small_button("↻")
+                            .on_hover_text(if lang == "zh" { "重設 Token 計數" } else { "Reset token counter" })
+                            .clicked()
+                        {
+                            if let Ok(mut b) = self.app_state.token_budgeter.try_lock() {
+                                b.spent_prompt = 0;
+                                b.spent_completion = 0;
+                            }
+                        }
+                        ui.label(
+                            egui::RichText::new(format!("{}/{}", spent, budget_total))
+                                .size(FONT_CAPTION).color(TEXT_MUTED),
+                        );
+                        let bar_rect = ui
+                            .allocate_space(egui::Vec2::new(TOKEN_BAR_WIDTH, TOKEN_BAR_HEIGHT)).1;
+                        ui.painter().rect_filled(bar_rect, 3.0, BG_TERTIARY);
+                        let fill_w = bar_rect.width() * (budget_ratio as f32).min(1.0);
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_size(
+                                bar_rect.min,
+                                egui::Vec2::new(fill_w, bar_rect.height()),
+                            ),
+                            3.0,
+                            budget_color,
+                        );
+                        ui.label(
+                            egui::RichText::new(t("token_budget", &lang))
+                                .size(FONT_CAPTION).color(TEXT_SECONDARY),
+                        );
+
+                        // ▤ 右面板開關
+                        let panel_open = self.ui_state.lock().unwrap().right_panel_open;
+                        if ui.selectable_label(panel_open, "▤")
+                            .on_hover_text(t("toggle_panel", &lang))
+                            .clicked()
+                        {
+                            let mut st = self.ui_state.lock().unwrap();
+                            st.right_panel_open = !st.right_panel_open;
+                        }
+
+                        // 語言切換
+                        let lang_btn = if lang == "zh" { "EN" } else { "中" };
+                        if ui.small_button(lang_btn).on_hover_text(t("language", &lang)).clicked() {
+                            let mut st = self.ui_state.lock().unwrap();
+                            st.language = if st.language == "zh" { "en".into() } else { "zh".into() };
+                            let mut cfg = self.app_state.config.lock().unwrap().clone();
+                            cfg.general.language = if st.language == "zh" { "zh-TW".into() } else { "en-US".into() };
+                            let _ = cfg.save();
+                            *self.app_state.config.lock().unwrap() = cfg;
+                        }
+
                         ui.menu_button(egui::RichText::new(t("menu_view", &lang)).size(13.5), |ui| {
                             if ui.button(format!("🌐 {}", t("language", &lang))).clicked() {
                                 let mut st = self.ui_state.lock().unwrap();
@@ -1717,10 +1894,7 @@ impl eframe::App for AgnesApp {
                         });
                         ui.menu_button(egui::RichText::new(t("menu_file", &lang)).size(13.5), |ui| {
                             if ui.button(format!("＋ {}", t("new_conversation", &lang))).clicked() {
-                                let mut st = self.ui_state.lock().unwrap();
-                                st.active_conversation_id = None;
-                                st.active_messages.clear();
-                                st.audit_results.clear();
+                                self.ui_state.lock().unwrap().reset_session();
                                 ui.close_menu();
                             }
                             if ui.button(format!("⚙ {}", t("settings", &lang))).clicked() {
@@ -1744,72 +1918,82 @@ impl eframe::App for AgnesApp {
             return;
         }
 
-        // ── Left sidebar（Antigravity 風格：專案/全域 Tab + 巢狀 Session）──────
+        // ── Left sidebar：＋新對話 → 範疇膠囊 → 最近 → 專案樹/全域 → 底部 ⚙ ──
         egui::SidePanel::left("sidebar")
             .default_width(240.0)
             .min_width(200.0)
             .max_width(340.0)
+            .frame(
+                egui::Frame::default()
+                    .fill(BG_SIDEBAR)
+                    .inner_margin(SPACING_SM),
+            )
             .show(ctx, |ui| {
                 let mut st = self.ui_state.lock().unwrap();
-                ui.add_space(8.0);
+                ui.add_space(SPACING_XS);
 
-                // Tab 列：📁 專案 | 🌍 全域 —— 切 Tab 即切工作模式
+                // ＋ 新對話：整寬品牌橘按鈕（在目前範疇下開新 Session）
+                let new_conv_btn = egui::Button::new(
+                    egui::RichText::new(format!("＋  {}", t("new_conversation", &lang)))
+                        .size(14.0).color(TEXT_PRIMARY).strong(),
+                )
+                .fill(ACCENT_ORANGE)
+                .corner_radius(RADIUS_BUTTON)
+                .min_size(egui::Vec2::new(ui.available_width(), SIDEBAR_BTN_HEIGHT));
+                if ui.add(new_conv_btn).clicked() {
+                    st.reset_session();
+                }
+
+                ui.add_space(SPACING_SM);
+
+                // 膠囊 segmented：📁 專案 | 🌍 全域 —— 切換即切工作模式並寫回 config
                 let mut switch_to: Option<usize> = None;
-                ui.horizontal(|ui| {
-                    let half = (ui.available_width() - 6.0) / 2.0;
-                    let tabs = [
-                        (0_usize, "📁", "tab_projects", ACCENT_BLUE),
-                        (1_usize, "🌍", "tab_global", ACCENT_ORANGE),
-                    ];
-                    for (tab_idx, icon, key, color) in tabs {
-                        let active = st.sidebar_tab == tab_idx;
-                        let (fill, text_color) = if active {
-                            (egui::Color32::from_rgb(40, 60, 100), color)
-                        } else {
-                            (BG_TERTIARY, TEXT_SECONDARY)
-                        };
-                        if ui.add_sized(
-                            egui::vec2(half, 30.0),
-                            egui::Button::new(
-                                egui::RichText::new(format!("{} {}", icon, t(key, &lang)))
-                                    .size(14.0).color(text_color).strong(),
-                            ).fill(fill).corner_radius(6),
-                        ).clicked() && !active {
-                            switch_to = Some(tab_idx);
-                        }
-                    }
-                });
+                egui::Frame::default()
+                    .fill(BG_CARD)
+                    .corner_radius(RADIUS_BADGE)
+                    .inner_margin(egui::Margin::same(3))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACING_XS;
+                            let half = (ui.available_width() - SPACING_XS) / 2.0;
+                            let tabs = [(0_usize, "📁", "tab_projects"), (1_usize, "🌍", "tab_global")];
+                            for (tab_idx, icon, key) in tabs {
+                                let active = st.sidebar_tab == tab_idx;
+                                let (fill, text_color) = if active {
+                                    (BG_HOVER, TEXT_PRIMARY)
+                                } else {
+                                    (egui::Color32::TRANSPARENT, TEXT_SECONDARY)
+                                };
+                                if ui.add_sized(
+                                    egui::vec2(half, SEGMENT_HEIGHT),
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} {}", icon, t(key, &lang)))
+                                            .size(FONT_SMALL).color(text_color).strong(),
+                                    ).fill(fill).corner_radius(RADIUS_BADGE),
+                                ).clicked() && !active {
+                                    switch_to = Some(tab_idx);
+                                }
+                            }
+                        });
+                    });
                 if let Some(tab_idx) = switch_to {
                     st.sidebar_tab = tab_idx;
                     st.work_mode = if tab_idx == 1 { "global".into() } else { "project".into() };
-                    st.active_conversation_id = None;
-                    st.active_messages.clear();
-                    st.audit_results.clear();
+                    st.reset_session();
                     let mut cfg = self.app_state.config.lock().unwrap().clone();
                     cfg.general.project_mode = st.work_mode.clone();
                     let _ = cfg.save();
                     *self.app_state.config.lock().unwrap() = cfg;
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(SPACING_SM);
 
-                // ＋ 新增對話：在目前 Tab 的範疇下開新 Session
-                let new_conv_btn = egui::Button::new(
-                    egui::RichText::new(format!("＋  {}", t("new_conversation", &lang)))
-                        .size(14.0).color(TEXT_PRIMARY).strong(),
-                )
-                .fill(egui::Color32::from_rgb(40, 60, 100))
-                .corner_radius(8)
-                .min_size(egui::Vec2::new(ui.available_width(), 36.0));
-                if ui.add(new_conv_btn).clicked() {
-                    st.active_conversation_id = None;
-                    st.active_messages.clear();
-                    st.audit_results.clear();
-                }
+                // 最近：目前範疇最新 N 筆 Session 扁平列
+                self.render_recent_rows(ui, &mut st, &lang);
 
-                ui.add_space(8.0);
+                ui.add_space(SPACING_SM);
                 ui.separator();
-                ui.add_space(8.0);
+                ui.add_space(SPACING_SM);
 
                 if st.sidebar_tab == 1 {
                     self.render_global_tab(ui, &mut st, &lang);
@@ -1817,171 +2001,44 @@ impl eframe::App for AgnesApp {
                     self.render_projects_tab(ui, &mut st, &lang);
                 }
 
-                // 底部釘住：⚙ 設定
+                // 底部釘住：⚙ 設定 + 模式徽章
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    ui.add_space(8.0);
-                    if ui.add(
-                        egui::Button::new(
-                            egui::RichText::new(format!("⚙  {}", t("settings", &lang))).size(14.0),
-                        ).frame(false)
-                    ).clicked() {
-                        st.settings_open = true;
-                    }
-                    ui.separator();
-                });
-            });
-
-        // ── Right Agent Panel ─────────────────────────────────────────────────
-        egui::SidePanel::right("agent_panel")
-            .default_width(260.0)
-            .min_width(220.0)
-            .max_width(360.0)
-            .show(ctx, |ui| {
-                // Paint a brighter background manually so agent panel stands out
-                let panel_rect = ui.max_rect();
-                ui.painter().rect_filled(panel_rect, 0.0, BG_TERTIARY);
-                ui.painter().line_segment(
-                    [panel_rect.left_top(), panel_rect.left_bottom()],
-                    egui::Stroke::new(1.0, BORDER),
-                );
-
-                ui.label(egui::RichText::new(format!("🤖 {}", t("agent_status", &lang))).size(14.5).color(TEXT_PRIMARY).strong());
-
-                // 範疇副標：面板狀態跟著目前 Session/專案走
-                let (scope_text, scope_color) = {
-                    let st = self.ui_state.lock().unwrap();
-                    if st.work_mode == "global" {
-                        (t("panel_scope_global", &lang), ACCENT_ORANGE)
-                    } else {
-                        let project = st.selected_project_idx
-                            .and_then(|i| st.projects.get(i))
-                            .map(|p| p.name.clone())
-                            .unwrap_or_default();
-                        let session = st.active_conversation_id.as_deref()
-                            .and_then(|cid| st.conversations.iter().find(|c| c.id == cid))
-                            .map(|c| truncate_chars(&c.title, 10));
-                        match session {
-                            Some(s) => (format!("📂 {} / 💬 {}", project, s), ACCENT_BLUE),
-                            None => (format!("📂 {}", project), TEXT_SECONDARY),
-                        }
-                    }
-                };
-                ui.label(egui::RichText::new(scope_text).size(12.0).color(scope_color));
-                let has_audits = !self.ui_state.lock().unwrap().audit_results.is_empty();
-                ui.label(
-                    egui::RichText::new(if has_audits { t("legend_agents", &lang) } else { t("panel_scope_idle", &lang) })
-                        .size(11.5).color(TEXT_MUTED),
-                );
-                ui.add_space(6.0);
-
-                let groups: &[(&str, &[&str])] = &[
-                    ("G1 記憶蒸餾", &["ContextDistillerAlpha", "ContextDistillerBeta", "DistillationIntegrator", "FactHallucinationAuditor", "TokenOverlapAuditor"]),
-                    ("G2 工作流",   &["WorkflowTopology", "WorkflowRuntimeEvaluator", "SlopVibeAuditor", "SlopPathPurgeSpecialist"]),
-                    ("G3 指揮",     &["OrchestratorAgent", "LocaleCalibrationSpecialist", "LeadSystemArchitect"]),
-                    ("G4 效能",     &["PerformanceArchitectureEngineer", "ResourceAnalyticsEngineer", "MemoryEfficiencyReviewer"]),
-                    ("G5 安全",     &["SecurityArchitectureDesigner", "DefensiveCodingSpecialist", "SecurityComplianceAuditor"]),
-                    ("G6 工程",     &["CoreEngineCoder", "IntegrationEngineer", "MultimodalMediaSpecialist", "SandboxRuntimeTester"]),
-                ];
-
-                let audits = self.ui_state.lock().unwrap().audit_results.clone();
-
-                egui::ScrollArea::vertical().id_salt("agent_scroll").show(ui, |ui| {
-                    for (g_name, agents) in groups {
-                        ui.add_space(2.0);
-                        ui.label(egui::RichText::new(*g_name).color(ACCENT_BLUE).strong().size(13.0));
-                        for a in *agents {
-                            let audit = audits.iter().find(|x| x.agent_name == *a);
-                            let (status_color, status_text, name_color) = match audit {
-                                Some(r) if r.verdict == "PASSED"   => (ACCENT_GREEN,  "✓", TEXT_PRIMARY),
-                                Some(r) if r.verdict == "REJECTED" => (ACCENT_RED,    "✗", ACCENT_RED),
-                                Some(r) if r.verdict == "SKIPPED"  => (TEXT_SECONDARY, "~", TEXT_SECONDARY),
-                                // DORMANT：按路由休眠（未激活 = 零成本），名稱同步轉灰
-                                Some(_) => (TEXT_MUTED, "·", TEXT_MUTED),
-                                None    => (TEXT_MUTED, "·", TEXT_PRIMARY),
-                            };
-                            let row = ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(format!("  {}", a)).size(12.5).color(name_color));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(egui::RichText::new(status_text).color(status_color).size(13.0));
-                                });
-                            });
-                            // hover 顯示該代理本輪裁決原因（07_UI_SPEC：點代理看 gate 結果）
-                            if let Some(r) = audit {
-                                row.response.on_hover_text(&r.reason);
-                            }
-                        }
-                        ui.add_space(3.0);
-                    }
-                });
-
-                // ConfirmationGate (try_lock = synchronous, safe in render loop)
-                let pending_state = self.app_state.pending_state
-                    .try_lock().ok().and_then(|g| g.clone());
-
-                if let Some(pending) = pending_state {
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(t("pending_approval", &lang))
-                            .size(13.5).color(ACCENT_ORANGE).strong(),
-                    );
-                    for tool in &pending.pending_tools {
-                        egui::Frame::default()
-                            .fill(BG_CARD)
-                            .corner_radius(4)
-                            .inner_margin(6.0)
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new(&tool.name).size(13.0).strong());
-                                if let Some(ref path) = tool.path {
-                                    ui.label(egui::RichText::new(path).size(12.0).color(TEXT_SECONDARY));
-                                }
-                            });
-                    }
+                    ui.add_space(SPACING_SM);
                     ui.horizontal(|ui| {
-                        if ui.button("✓ Approve").clicked() {
-                            let app_state = self.app_state.clone();
-                            let ui_state = self.ui_state.clone();
-                            let ctx2 = ctx.clone();
-                            self.app_state.engine_runtime.spawn(async move {
-                                let taken = app_state.pending_state.lock().await.take();
-                                if let Some(p) = taken {
-                                    // 沿用送出當下的工作區——空工作區會讓路徑圈禁失效
-                                    let lp = AgentLoop::new(
-                                        app_state.config.lock().unwrap().clone(),
-                                        p.workspace_path.clone(),
+                        if ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("⚙  {}", t("settings", &lang))).size(14.0),
+                            ).frame(false)
+                        ).clicked() {
+                            st.settings_open = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let (mode_icon, mode_key, mode_color) = if st.work_mode == "global" {
+                                ("🌍", "work_mode_global", ACCENT_ORANGE)
+                            } else {
+                                ("📁", "work_mode_project", TEXT_SECONDARY)
+                            };
+                            egui::Frame::default()
+                                .fill(BG_CARD)
+                                .corner_radius(RADIUS_BADGE)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{} {}", mode_icon, t(mode_key, &lang)))
+                                            .size(FONT_CAPTION).color(mode_color),
                                     );
-                                    let mut results = Vec::new();
-                                    for tool in &p.pending_tools {
-                                        results.push(lp.execute_tool(tool, &app_state.mcp_manager).await);
-                                    }
-                                    // 結果入庫 + 顯示於聊天流
-                                    if let Ok(conn) = Connection::open(&app_state.db_path) {
-                                        for r in &results {
-                                            let _ = app_lib::add_conversation_message(
-                                                &conn, &p.conversation_id, "tool", r,
-                                            );
-                                        }
-                                    }
-                                    let mut st = ui_state.lock().unwrap();
-                                    for r in results {
-                                        st.active_messages.push(ChatMessage {
-                                            role: "tool".into(),
-                                            content: r,
-                                        });
-                                    }
-                                }
-                                ctx2.request_repaint();
-                            });
-                        }
-                        if ui.button("✕ Reject").clicked() {
-                            // try_lock is safe: if lock held briefly by another task,
-                            // the pending state clears on the next frame instead.
-                            if let Ok(mut lock) = self.app_state.pending_state.try_lock() {
-                                *lock = None;
-                            }
-                        }
+                                });
+                        });
                     });
-                }
+                    ui.separator();
+                });
             });
+
+        // ── Right panel：三 Tab（代理人 / 變更 / 檔案，ui_panels）────────────
+        let right_panel_open = self.ui_state.lock().unwrap().right_panel_open;
+        if right_panel_open {
+            self.render_right_panel(ctx, &lang, diff_max_lines);
+        }
 
         // ── Central Panel ─────────────────────────────────────────────────────
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -2024,15 +2081,20 @@ impl eframe::App for AgnesApp {
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| "Agnes AI".to_string());
                 // 全域模式不顯示專案名——範疇是整台電腦（GUI QA 實測抓到的誤導文案）
-                let heading = if st.work_mode == "global" {
+                let subtitle = if st.work_mode == "global" {
                     t("welcome_global", &lang)
                 } else {
                     t_with("welcome_question", &lang, &project_name)
                 };
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        egui::RichText::new(heading)
-                            .size(28.0).color(TEXT_PRIMARY).strong(),
+                        egui::RichText::new("Agnes AI")
+                            .size(FONT_TITLE).color(TEXT_PRIMARY).strong(),
+                    );
+                    ui.add_space(SPACING_SM);
+                    ui.label(
+                        egui::RichText::new(subtitle)
+                            .size(FONT_BODY).color(TEXT_SECONDARY),
                     );
                 });
                 ui.add_space(28.0);
@@ -2058,73 +2120,71 @@ impl eframe::App for AgnesApp {
             // ── 對話進行中：訊息流 + 底部輸入卡 ──
             let avail_height = ui.available_height() - 130.0;
 
+            let mut chat_actions: Vec<ChatAction> = Vec::new();
             egui::ScrollArea::vertical()
                 .max_height(avail_height)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap); // Enable word wrapping globally in scroll area
                     {
-                        for (msg_idx, msg) in st.active_messages.iter().enumerate() {
-                            let is_user = msg.role == "user";
-                            let is_tool = msg.role == "tool";
-                            
-                            let bg = if is_user {
-                                BG_TERTIARY
-                            } else if is_tool {
-                                egui::Color32::from_rgb(20, 24, 33)
-                            } else {
-                                BG_CARD
-                            };
-                            
-                            let name_color = if is_user {
-                                ACCENT_BLUE
-                            } else if is_tool {
-                                ACCENT_GREEN
-                            } else {
-                                ACCENT_ORANGE
-                            };
-                            
-                            let name = if is_user {
-                                if lang == "zh" { "你" } else { "You" }
-                            } else if is_tool {
-                                if lang == "zh" { "🛠 執行結果" } else { "🛠 Tool Output" }
-                            } else {
-                                "Agnes AI"
-                            };
-
-                            egui::Frame::default()
-                                .fill(bg)
-                                .corner_radius(8)
-                                .stroke(egui::Stroke::new(1.0, BORDER))
-                                .inner_margin(12.0)
-                                .show(ui, |ui| {
-                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                    ui.label(
-                                        egui::RichText::new(name).color(name_color).strong().size(15.5),
-                                    );
-                                    ui.add_space(4.0);
-                                    if is_tool {
-                                        render_collapsible_tool_output(ui, &msg.content, msg_idx);
-                                    } else {
-                                        render_message_content(ui, &msg.content, msg_idx);
+                        let UiState { active_messages, file_changes, diff_stats_cache, .. } =
+                            &mut *st;
+                        let mut i = 0usize;
+                        while i < active_messages.len() {
+                            let msg = &active_messages[i];
+                            match msg.role.as_str() {
+                                "user" => {
+                                    ui_chat::render_user_message(ui, &msg.content);
+                                    i += 1;
+                                }
+                                "assistant" => {
+                                    // 其後連續 "tool" 訊息依序配對到本訊息的工具標籤，
+                                    // 不再單獨洗版
+                                    let mut results: Vec<&str> = Vec::new();
+                                    let mut j = i + 1;
+                                    while j < active_messages.len()
+                                        && active_messages[j].role == "tool"
+                                    {
+                                        results.push(active_messages[j].content.as_str());
+                                        j += 1;
                                     }
-                                });
-                            ui.add_space(8.0);
+                                    ui_chat::render_assistant_message(
+                                        ui, i, &msg.content, &results, &lang, &mut chat_actions,
+                                    );
+                                    i = j;
+                                }
+                                _ => {
+                                    // 無前導 assistant 的孤兒 tool 訊息（舊資料防呆）
+                                    ui.label(
+                                        egui::RichText::new(format!("🛠 {}", t("tool_output", &lang)))
+                                            .size(FONT_CAPTION).color(TEXT_MUTED),
+                                    );
+                                    ui_chat::render_collapsible_tool_output(
+                                        ui, &msg.content, i, &lang,
+                                    );
+                                    i += 1;
+                                }
+                            }
+                            ui.add_space(SPACING_MESSAGE);
                         }
+
+                        // 對話尾端：檔案變更 chips（點擊 → 右面板「變更」Tab 選中該筆）
+                        ui_chat::render_change_chips(
+                            ui, file_changes, diff_stats_cache, diff_max_lines, &mut chat_actions,
+                        );
                     }
 
                     // Render pulsing loader spinner card if agent is running
                     if is_running {
-                        let pulsing_bg = egui::Color32::from_rgb(30, 34, 42);
                         egui::Frame::default()
-                            .fill(pulsing_bg)
-                            .corner_radius(8)
-                            .stroke(egui::Stroke::new(1.0, ACCENT_BLUE))
-                            .inner_margin(12.0)
+                            .fill(BG_CARD)
+                            .corner_radius(RADIUS_CARD)
+                            .stroke(egui::Stroke::new(1.0, ACCENT_ORANGE))
+                            .inner_margin(SPACING_CARD_INNER)
                             .show(ui, |ui| {
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("Agnes AI").color(ACCENT_BLUE).strong().size(16.0));
+                                    ui.label(egui::RichText::new("Agnes AI").color(ACCENT_ORANGE).strong().size(16.0));
                                     ui.add(egui::Spinner::new());
                                     ui.label(egui::RichText::new(t("running_hint", &lang))
                                         .color(TEXT_SECONDARY).size(16.0));
@@ -2132,6 +2192,18 @@ impl eframe::App for AgnesApp {
                             });
                     }
                 });
+
+            // 訊息流互動統一套用：chips → 變更 Tab、讀寫活動列 → 檔案 Tab
+            for action in chat_actions {
+                match action {
+                    ChatAction::OpenChange(id) => {
+                        ui_panels::select_change(&mut st, id, diff_max_lines);
+                    }
+                    ChatAction::OpenFile(path) => {
+                        ui_panels::open_file_in_viewer(&mut st, &path, viewer_max_bytes, &lang);
+                    }
+                }
+            }
 
             // 底部釘住輸入卡（Codex / Antigravity 2.0 風格）
             let mut send = false;
@@ -2157,188 +2229,6 @@ impl eframe::App for AgnesApp {
         // ── QA 自我截圖鉤子 ───────────────────────────────────────────────────
         self.qa_screenshot_hook(ctx);
     }
-}
-
-// ─── 訊息渲染：收合式區塊（對標 Claude/Codex/Antigravity 摺疊長輸出）──────────
-
-/// 超過此行數的碼塊/工具輸出預設收合
-const COLLAPSE_LINES_THRESHOLD: usize = 8;
-/// 收合標題的摘要字元數
-const COLLAPSE_SUMMARY_CHARS: usize = 60;
-
-fn emit_text(ui: &mut egui::Ui, text: &str) {
-    if text.trim().is_empty() {
-        return;
-    }
-    ui.add(
-        egui::Label::new(
-            egui::RichText::new(text.trim_end()).size(FONT_BODY).color(TEXT_PRIMARY),
-        )
-        .wrap(),
-    );
-}
-
-fn emit_mono_frame(ui: &mut egui::Ui, text: &str) {
-    egui::Frame::default()
-        .fill(egui::Color32::from_rgb(20, 24, 33))
-        .corner_radius(4)
-        .inner_margin(8.0)
-        .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(text.trim_end())
-                        .font(egui::FontId::monospace(FONT_MONO))
-                        .color(TEXT_PRIMARY),
-                )
-                .wrap(),
-            );
-        });
-}
-
-/// 短內容直接顯示；長內容收合為「標題（N 行）」可展開列。
-fn emit_collapsible(ui: &mut egui::Ui, title: &str, body: &str, salt: (usize, usize)) {
-    let lines = body.lines().count();
-    if lines <= COLLAPSE_LINES_THRESHOLD {
-        if !title.is_empty() {
-            ui.label(egui::RichText::new(title).size(13.0).color(TEXT_SECONDARY));
-        }
-        emit_mono_frame(ui, body);
-        return;
-    }
-    egui::CollapsingHeader::new(
-        egui::RichText::new(format!("{}（{} 行）", title, lines))
-            .size(13.5)
-            .color(TEXT_SECONDARY),
-    )
-    .id_salt(("collapse_blk", salt))
-    .default_open(false)
-    .show(ui, |ui| emit_mono_frame(ui, body));
-}
-
-fn extract_attr(line: &str, attr: &str) -> String {
-    let needle = format!("{}=\"", attr);
-    line.find(&needle)
-        .and_then(|i| {
-            let rest = &line[i + needle.len()..];
-            rest.find('"').map(|j| rest[..j].to_string())
-        })
-        .unwrap_or_default()
-}
-
-/// 助理訊息渲染：一般文字直出；``` 碼塊與工具呼叫 XML 區塊收合（避免長文洗版）。
-fn render_message_content(ui: &mut egui::Ui, content: &str, msg_idx: usize) {
-    let mut text_buf = String::new();
-    let mut block_buf = String::new();
-    let mut in_code = false;
-    let mut tool_close: Option<(String, String)> = None; // (結束標籤, 收合標題)
-    let mut block_idx = 0usize;
-
-    for line in content.lines() {
-        // 工具區塊內：累積直到結束標籤
-        if tool_close.is_some() {
-            let hit_close = {
-                let (close_tag, _) = tool_close.as_ref().unwrap();
-                line.trim_start().starts_with(close_tag.as_str())
-            };
-            if hit_close {
-                let (_, title) = tool_close.take().unwrap();
-                emit_collapsible(ui, &title, &block_buf, (msg_idx, block_idx));
-                block_idx += 1;
-                block_buf.clear();
-            } else {
-                block_buf.push_str(line);
-                block_buf.push('\n');
-            }
-            continue;
-        }
-        // 碼塊內：累積直到 ``` 結束
-        if in_code {
-            if line.trim_start().starts_with("```") {
-                emit_collapsible(ui, "📄 程式碼", &block_buf, (msg_idx, block_idx));
-                block_idx += 1;
-                block_buf.clear();
-                in_code = false;
-            } else {
-                block_buf.push_str(line);
-                block_buf.push('\n');
-            }
-            continue;
-        }
-
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") {
-            emit_text(ui, &text_buf);
-            text_buf.clear();
-            in_code = true;
-        } else if trimmed.starts_with("<write_file") {
-            emit_text(ui, &text_buf);
-            text_buf.clear();
-            let path = extract_attr(trimmed, "path");
-            tool_close = Some(("</write_file>".into(), format!("✍ write_file：{}", path)));
-        } else if trimmed.starts_with("<run_command>") {
-            emit_text(ui, &text_buf);
-            text_buf.clear();
-            tool_close = Some(("</run_command>".into(), "⚡ run_command".into()));
-        } else if trimmed.starts_with("<run_mcp") {
-            emit_text(ui, &text_buf);
-            text_buf.clear();
-            tool_close = Some(("</run_mcp>".into(), "🔌 run_mcp".into()));
-        } else if trimmed.starts_with("<read_file") {
-            emit_text(ui, &text_buf);
-            text_buf.clear();
-            let path = extract_attr(trimmed, "path");
-            ui.label(
-                egui::RichText::new(format!("📖 read_file：{}", path))
-                    .size(13.5)
-                    .color(TEXT_SECONDARY),
-            );
-        } else {
-            text_buf.push_str(line);
-            text_buf.push('\n');
-        }
-    }
-
-    // 尾端未閉合的區塊照樣輸出
-    if let Some((_, title)) = tool_close.take() {
-        emit_collapsible(ui, &title, &block_buf, (msg_idx, block_idx));
-    } else if in_code {
-        emit_collapsible(ui, "📄 程式碼", &block_buf, (msg_idx, block_idx));
-    }
-    emit_text(ui, &text_buf);
-}
-
-/// 工具執行結果渲染：短結果直出，長結果收合（標題=首行摘要）。
-fn render_collapsible_tool_output(ui: &mut egui::Ui, content: &str, msg_idx: usize) {
-    let lines = content.lines().count();
-    if lines <= COLLAPSE_LINES_THRESHOLD {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(content)
-                    .font(egui::FontId::monospace(FONT_MONO))
-                    .color(TEXT_PRIMARY),
-            )
-            .wrap(),
-        );
-        return;
-    }
-    let summary = truncate_chars(content.lines().next().unwrap_or(""), COLLAPSE_SUMMARY_CHARS);
-    egui::CollapsingHeader::new(
-        egui::RichText::new(format!("{}…（{} 行）", summary, lines))
-            .size(13.5)
-            .color(TEXT_SECONDARY),
-    )
-    .id_salt(("tool_out", msg_idx))
-    .default_open(false)
-    .show(ui, |ui| {
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(content)
-                    .font(egui::FontId::monospace(FONT_MONO))
-                    .color(TEXT_PRIMARY),
-            )
-            .wrap(),
-        );
-    });
 }
 
 fn main() {

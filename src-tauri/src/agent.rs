@@ -273,6 +273,8 @@ fn normalize_workspace(p: PathBuf) -> PathBuf {
 pub struct AgentLoop {
     pub config: Config,
     pub workspace_path: PathBuf,
+    /// 檔案變更追蹤的歸屬對話——None 時 write_file 跳過 diff 記錄（不 panic）。
+    pub current_conversation_id: Option<String>,
 }
 
 impl AgentLoop {
@@ -280,7 +282,15 @@ impl AgentLoop {
         Self {
             config,
             workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
+            current_conversation_id: None,
         }
+    }
+
+    /// 設定檔案變更記錄的歸屬對話 id。
+    /// run_step / execute_tool 皆為 &self 無法自行設定——main.rs 在
+    /// `AgentLoop::new(...)` 之後、執行工具之前呼叫本方法（見整合清單）。
+    pub fn set_conversation_id(&mut self, id: &str) {
+        self.current_conversation_id = Some(id.to_string());
     }
 
     pub fn run_audits(&self, tool_calls: &[ToolCall], messages: &[serde_json::Value]) -> Vec<AuditResult> {
@@ -845,10 +855,20 @@ impl AgentLoop {
                                         return format!("[ERROR] 無法建立目錄: {}", e);
                                     }
                                 }
+                                // 檔案變更追蹤：寫入前快照舊內容（不存在或非 UTF-8 → 空字串）
+                                let before_content =
+                                    fs::read_to_string(&full_path).unwrap_or_default();
                                 // Strip sensitive key content from stored content
                                 let safe_content = self.strip_secrets(&tool.content);
                                 match fs::write(&full_path, &safe_content) {
-                                    Ok(_) => format!("[SUCCESS] 成功寫入檔案: {}", relative_path),
+                                    Ok(_) => {
+                                        self.record_file_change(
+                                            relative_path,
+                                            &before_content,
+                                            &safe_content,
+                                        );
+                                        format!("[SUCCESS] 成功寫入檔案: {}", relative_path)
+                                    }
                                     Err(e) => format!("[ERROR] 無法寫入檔案 {}: {}", relative_path, e),
                                 }
                             }
@@ -900,6 +920,20 @@ impl AgentLoop {
                 }
                 _ => format!("[ERROR] 未知工具: {}", tool.name),
             }
+        }
+    }
+
+    /// 寫檔成功後記錄 before/after 快照，供 GUI 右側 diff 面板顯示。
+    /// conversation_id 未設定時靜默跳過；記錄失敗只記 log，絕不中斷工具執行。
+    /// db 路徑用 crate::resolve_db_path()——與 main.rs 建立 AppState.db_path
+    /// 的解析函式相同，保證寫進同一顆 DB（execute_tool 簽名凍結，無法傳入）。
+    fn record_file_change(&self, relative_path: &str, before: &str, after: &str) {
+        let Some(conv_id) = self.current_conversation_id.as_deref() else {
+            return;
+        };
+        let db_path = crate::resolve_db_path();
+        if let Err(e) = crate::add_file_change(&db_path, conv_id, relative_path, before, after) {
+            eprintln!("[Agnes] 檔案變更記錄失敗（不影響寫檔結果）: {}", e);
         }
     }
 
