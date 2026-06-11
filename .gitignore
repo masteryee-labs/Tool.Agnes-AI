@@ -18,3 +18,8 @@ memory_tags/
 /scratch/
 /render_test/
 /mock_project/
+
+
+# Added by cargo
+
+/target
