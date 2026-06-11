@@ -2,6 +2,17 @@
 
 > 技術：eframe/egui 0.31 原生渲染。零 Chromium。`ui/` 內的 HTML 原型僅作版面參考，最終以 egui 實作。
 
+## 已實作現況（2026-06-11）
+
+- **側邊欄 Tab 化**：頂部「📁 專案｜🌍 全域」雙 Tab，切 Tab 即切工作模式（同步寫回 `config.general.project_mode`）
+  - 專案 Tab：「＋ 新增專案」直接挑資料夾建專案；每個專案為摺疊節點，底下巢狀該專案的對話 Session（點擊載入續聊、🗑 刪除）與資料夾管理子摺疊
+  - 全域 Tab：橘色說明列 + 全域範疇 Session 清單（`conversations.project_id = 'global'` 哨兵）
+- **Session 持久化**：`conversations` 表新增 `project_id` 欄（含舊庫 ALTER 遷移與孤兒補綁）；新 Session 自動掛目前範疇
+- **API 金鑰 UX**：儲存後顯示遮罩金鑰（頭5尾4）+ SHA-256 指紋 + 常駐綠色「已儲存 ✓」
+- **全域字級**：egui text_styles 拉高（Body 16 / Button 15.5 / Mono 14.5 / Small 13），右側代理人面板與各小字同步放大
+- **MCP 設定**：「＋ 新增伺服器」為真表單（名稱/指令/引數 → 寫入 config 並立即啟動）；伺服器 toggle 即時 start/stop；🗑 刪除；工作區 `.mcp.json`（Claude 格式）唯讀列出；App 啟動時自動啟動 config + .mcp.json 全部啟用伺服器
+- **技能設定區**：列出工作區 `.claude/skills/*/SKILL.md`（Claude 格式），對話以 `/名稱` 呼叫
+
 ## 版面結構
 
 ```

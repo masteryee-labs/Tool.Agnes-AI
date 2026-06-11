@@ -6,12 +6,14 @@ mod orchestrator;
 mod agent;
 mod mcp;
 mod memory;
+mod skills;
 mod validation;
 
 #[cfg(test)]
 mod tests_integration;
 
 pub use config::Config;
+pub use config::McpServerConfig;
 pub use config::key_persistence;
 pub use db::*;
 pub use locale::*;
@@ -21,6 +23,7 @@ pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLeve
 pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
 pub use mcp::McpManager;
 pub use memory::*;
+pub use skills::{build_skills_system_prompt, load_mcp_json, load_skills, SkillInfo};
 pub use validation::*;
 
 use std::path::PathBuf;
