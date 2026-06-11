@@ -1,6 +1,106 @@
 use crate::agent::{AuditResult, ToolCall};
 use crate::config::Config;
 use serde_json::Value;
+use std::collections::HashMap;
+
+/// 休眠裁決字串（panel 以灰點顯示；未激活 = 不思考不輸出零成本）
+pub const VERDICT_DORMANT: &str = "DORMANT";
+
+// ─── 代理人分工路由（core.agents.toon / memory_distillation.toon）────────────
+// 按任務特徵決定誰激活、誰休眠。確定性規則，0 token。
+// 回傳：休眠代理 → 休眠原因。不在表中 = 激活。
+
+/// 任務特徵快照（一次掃描，所有路由規則共用）
+struct TaskTraits {
+    has_write: bool,
+    has_rs_write: bool,
+    has_cmd: bool,
+    has_media: bool,
+    conv_tokens: usize,
+}
+
+const WRITE_TOOLS: [&str; 3] = ["write_file", "replace_file_content", "multi_replace_file_content"];
+
+fn scan_traits(tool_calls: &[ToolCall], messages: &[Value]) -> TaskTraits {
+    let has_write = tool_calls.iter().any(|tc| WRITE_TOOLS.contains(&tc.name.as_str()));
+    let has_rs_write = tool_calls.iter().any(|tc| {
+        WRITE_TOOLS.contains(&tc.name.as_str())
+            && tc.path.as_deref().is_some_and(|p| p.ends_with(".rs"))
+    });
+    let has_cmd = tool_calls.iter().any(|tc| tc.name == "run_command" || tc.name == "run_mcp");
+    let has_media = messages.iter().rev().find(|m| m["role"] == "user")
+        .and_then(|m| m["content"].as_str())
+        .map(|c| {
+            let lower = c.to_lowercase();
+            lower.contains("image") || lower.contains("video")
+                || lower.contains("圖片") || lower.contains("影片")
+        })
+        .unwrap_or(false);
+    let conv_tokens = messages.iter()
+        .filter_map(|m| m["content"].as_str())
+        .map(crate::memory::estimate_tokens)
+        .sum();
+    TaskTraits { has_write, has_rs_write, has_cmd, has_media, conv_tokens }
+}
+
+/// 路由演算法：回傳「休眠代理 → 原因」。
+pub fn route_dormant_agents(
+    config: &Config,
+    tool_calls: &[ToolCall],
+    messages: &[Value],
+) -> HashMap<&'static str, String> {
+    let t = scan_traits(tool_calls, messages);
+    let mut dormant = HashMap::new();
+
+    // 寫檔審查組：無檔案寫入即休眠
+    if !t.has_write {
+        for agent in [
+            "SlopPathPurgeSpecialist",   // G4 路徑分流
+            "LeadSystemArchitect",       // G6 依賴白名單
+            "ResourceAnalyticsEngineer", // G8 阻塞 I/O
+            "SecurityComplianceAuditor", // G12 金鑰掃描
+            "CoreEngineCoder",           // G13 殘渣標記
+            "IntegrationEngineer",       // G14 blocking HTTP
+        ] {
+            dormant.insert(agent, "休眠：本步驟無檔案寫入".to_string());
+        }
+    }
+
+    // 指令執行審查組：無指令亦無寫檔即休眠
+    if !t.has_cmd && !t.has_write {
+        for agent in [
+            "PerformanceArchitectureEngineer", // G7 無限循環/超長等待
+            "SecurityArchitectureDesigner",    // G10 沙盒參數
+            "DefensiveCodingSpecialist",       // G11 Shell 注入
+        ] {
+            dormant.insert(agent, "休眠：本步驟無指令執行".to_string());
+        }
+    }
+
+    // 編譯級審查組（重量級）：僅 Rust 代碼寫入時激活——純聊天不再跑 clippy/cargo check
+    if !t.has_rs_write {
+        dormant.insert("MemoryEfficiencyReviewer", "休眠：無 Rust 代碼寫入，不需 Clippy".to_string());
+        dormant.insert("SandboxRuntimeTester", "休眠：無 Rust 代碼寫入，不需編譯檢查".to_string());
+    }
+
+    // 多模態：無媒體需求即休眠
+    if !t.has_media {
+        dormant.insert("MultimodalMediaSpecialist", "休眠：無多模態媒體需求".to_string());
+    }
+
+    // 記憶蒸餾組：對話量未達水位即整組休眠（memory_distillation.toon 激活條件）
+    let delta = config.memory.distill_trigger_delta;
+    if t.conv_tokens < delta {
+        let reason = format!("休眠：對話 {} tokens < 蒸餾水位 {}", t.conv_tokens, delta);
+        dormant.insert("ContextDistillerAlpha", reason.clone());
+        dormant.insert("ContextDistillerBeta", reason.clone());
+        dormant.insert("DistillationIntegrator", reason);
+    }
+
+    // 恆常激活：WorkflowTopology、WorkflowRuntimeEvaluator、SlopVibeAuditor、
+    // LocaleCalibrationSpecialist、FactHallucinationAuditor、TokenOverlapAuditor、OrchestratorAgent
+    dormant
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GateResult {
@@ -570,30 +670,81 @@ impl Gate for SandboxRuntimeTesterGate {
 
 // ─── Stage C: Semantic / LLM ────────────────────────────────────────────────
 
+/// G17 防幻覺：助理文字宣稱「已建立/已寫入檔案」但本步驟沒有任何對應工具呼叫
+/// → 虛假回報，一票否決。純確定性字串比對，0 token。
 pub struct FactHallucinationAuditorGate;
 impl Gate for FactHallucinationAuditorGate {
     fn name(&self) -> &'static str { "FactHallucinationAuditor" }
     fn gate_id(&self) -> &'static str { "G17" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        let claim_phrases = [
+            "已建立檔案", "已寫入檔案", "已成功建立", "已成功寫入", "檔案已建立", "檔案已寫入",
+            "i have created the file", "i've created the file",
+            "file has been created", "file has been written",
+        ];
+        let last_assistant = change.messages.iter().rev()
+            .find(|m| m["role"] == "assistant")
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("");
+        let lower = last_assistant.to_lowercase();
+        let claims_write = claim_phrases.iter().any(|p| lower.contains(p));
+        let has_write_tool = change.tool_calls.iter()
+            .any(|tc| WRITE_TOOLS.contains(&tc.name.as_str()));
+        if claims_write && !has_write_tool {
+            return GateResult::Reject {
+                gate_id: self.gate_id().to_string(),
+                file: None,
+                line: None,
+                reason: "宣稱已建立/寫入檔案，但本步驟無任何寫檔工具呼叫——虛假回報".to_string(),
+            };
+        }
         GateResult::Pass
     }
 }
 
+/// G18 Token 上限審計：提議寫入的 .md 記憶/文件檔超過 md_token_cap 一票否決
+/// （memory_distillation.toon TokenOverlapAuditor 規則，禁止 LLM 呼叫）。
 pub struct TokenOverlapAuditorGate;
 impl Gate for TokenOverlapAuditorGate {
     fn name(&self) -> &'static str { "TokenOverlapAuditor" }
     fn gate_id(&self) -> &'static str { "G18" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        let cap = change.config.memory.md_token_cap;
+        for tc in change.tool_calls {
+            if tc.name == "write_file"
+                && tc.path.as_deref().is_some_and(|p| p.ends_with(".md"))
+            {
+                let tokens = crate::memory::estimate_tokens(&tc.content);
+                if tokens > cap {
+                    return GateResult::Reject {
+                        gate_id: self.gate_id().to_string(),
+                        file: tc.path.clone(),
+                        line: None,
+                        reason: format!(".md 檔 {} tokens 超過 md_token_cap {}，必須分裂", tokens, cap),
+                    };
+                }
+            }
+        }
         GateResult::Pass
     }
 }
 
+/// G19/G20 蒸餾器：路由層判定對話量達水位才激活；激活即代表蒸餾排程
+/// 已由 run_step 記憶管線（distill_text + 水位記號）承接，此處驗證前置條件。
 pub struct ContextDistillerAlphaGate;
 impl Gate for ContextDistillerAlphaGate {
     fn name(&self) -> &'static str { "ContextDistillerAlpha" }
     fn gate_id(&self) -> &'static str { "G19" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
-        GateResult::Skip { reason: "非大文本增量，蒸餾休眠".to_string() }
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        if change.config.memory.chunk_size == 0 || change.config.memory.overlap_lines == 0 {
+            return GateResult::Reject {
+                gate_id: self.gate_id().to_string(),
+                file: None,
+                line: None,
+                reason: "蒸餾已激活但 chunk_size/overlap_lines 為 0，滑動視窗無法重疊".to_string(),
+            };
+        }
+        GateResult::Pass
     }
 }
 
@@ -601,8 +752,17 @@ pub struct ContextDistillerBetaGate;
 impl Gate for ContextDistillerBetaGate {
     fn name(&self) -> &'static str { "ContextDistillerBeta" }
     fn gate_id(&self) -> &'static str { "G20" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
-        GateResult::Skip { reason: "非大文本增量，蒸餾休眠".to_string() }
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        // Beta 與 Alpha 並行、共用同一組視窗參數；上限關係錯置即否決
+        if change.config.memory.overlap_lines * 2 >= change.config.memory.chunk_size {
+            return GateResult::Reject {
+                gate_id: self.gate_id().to_string(),
+                file: None,
+                line: None,
+                reason: "overlap_lines*2 >= chunk_size，重疊區吞掉整個視窗".to_string(),
+            };
+        }
+        GateResult::Pass
     }
 }
 
@@ -610,31 +770,46 @@ pub struct DistillationIntegratorGate;
 impl Gate for DistillationIntegratorGate {
     fn name(&self) -> &'static str { "DistillationIntegrator" }
     fn gate_id(&self) -> &'static str { "G21" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
-        GateResult::Skip { reason: "無並行蒸餾產出，跳過".to_string() }
-    }
-}
-
-// ─── Stage D: Signoff ───────────────────────────────────────────────────────
-
-pub struct OrchestratorAgentGate;
-impl Gate for OrchestratorAgentGate {
-    fn name(&self) -> &'static str { "OrchestratorAgent" }
-    fn gate_id(&self) -> &'static str { "G22" }
-    fn check(&self, _change: &ProposedChange) -> GateResult {
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        // 整合器產出受 md_token_cap 約束；cap 為 0 時所有產出必被否決 → 組態矛盾
+        if change.config.memory.md_token_cap == 0 {
+            return GateResult::Reject {
+                gate_id: self.gate_id().to_string(),
+                file: None,
+                line: None,
+                reason: "md_token_cap 為 0，蒸餾產出無法落地".to_string(),
+            };
+        }
         GateResult::Pass
     }
 }
 
 // ─── Pipeline runner ────────────────────────────────────────────────────────
 
+/// 22 代理人分工執行器：
+/// 1. 路由演算法決定激活集合（休眠者直接記 DORMANT，不執行、零成本）
+/// 2. Stage A（靜態確定性）激活閘門並行執行
+/// 3. Stage B/C（編譯期/語意）激活閘門依序執行
+/// 4. Stage D：OrchestratorAgent 總和簽核——彙整前 21 道裁決，任一 REJECT 即整案 REJECT
 pub fn run_all_gates(
     config: &Config,
     tool_calls: &[ToolCall],
     messages: &[Value],
 ) -> Vec<AuditResult> {
     let change = ProposedChange { tool_calls, messages, config };
-    
+    let dormant = route_dormant_agents(config, tool_calls, messages);
+
+    let run_or_dormant = |gate: &dyn Gate| -> AuditResult {
+        if let Some(reason) = dormant.get(gate.name()) {
+            return AuditResult {
+                agent_name: gate.name().to_string(),
+                verdict: VERDICT_DORMANT.to_string(),
+                reason: reason.clone(),
+            };
+        }
+        gate.check(&change).to_audit(gate.name())
+    };
+
     // Stage A gates run in parallel (using scoped threads for zero dependencies)
     let stage_a_gates: Vec<Box<dyn Gate>> = vec![
         Box::new(WorkflowTopologyGate),
@@ -656,17 +831,14 @@ pub fn run_all_gates(
     let stage_a_results = std::thread::scope(|s| {
         let mut handles = Vec::new();
         for gate in &stage_a_gates {
-            let handle = s.spawn(|| {
-                let result = gate.check(&change);
-                result.to_audit(gate.name())
-            });
+            let handle = s.spawn(|| run_or_dormant(gate.as_ref()));
             handles.push(handle);
         }
         handles.into_iter().map(|h| h.join().unwrap()).collect::<Vec<_>>()
     });
     audits.extend(stage_a_results);
 
-    // Stage B, C, D run sequentially
+    // Stage B, C run sequentially
     let remaining_gates: Vec<Box<dyn Gate>> = vec![
         // Stage B
         Box::new(PerformanceArchitectureEngineerGate),
@@ -679,14 +851,123 @@ pub fn run_all_gates(
         Box::new(ContextDistillerAlphaGate),
         Box::new(ContextDistillerBetaGate),
         Box::new(DistillationIntegratorGate),
-        // Stage D
-        Box::new(OrchestratorAgentGate),
     ];
 
     for gate in remaining_gates {
-        let result = gate.check(&change);
-        audits.push(result.to_audit(gate.name()));
+        audits.push(run_or_dormant(gate.as_ref()));
     }
 
+    // Stage D：總和簽核（看得到前 21 道的真實裁決，不再是恆 PASS 空殼）
+    let rejected: Vec<&AuditResult> = audits.iter().filter(|a| a.verdict == "REJECTED").collect();
+    let active_count = audits.iter().filter(|a| a.verdict != VERDICT_DORMANT).count();
+    let signoff = if rejected.is_empty() {
+        AuditResult {
+            agent_name: "OrchestratorAgent".to_string(),
+            verdict: "PASSED".to_string(),
+            reason: format!(
+                "整合審查完成：{} 道激活全數通過，{} 道按任務路由休眠",
+                active_count,
+                audits.len() - active_count,
+            ),
+        }
+    } else {
+        AuditResult {
+            agent_name: "OrchestratorAgent".to_string(),
+            verdict: "REJECTED".to_string(),
+            reason: format!(
+                "[REJECT: G22 | 原因: {} 道審查未過（{}）]",
+                rejected.len(),
+                rejected.iter().map(|a| a.agent_name.as_str()).collect::<Vec<_>>().join("、"),
+            ),
+        }
+    };
+    audits.push(signoff);
+
     audits
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use crate::agent::ToolCall;
+
+    fn chat_messages(user: &str, assistant: &str) -> Vec<Value> {
+        vec![
+            serde_json::json!({"role": "user", "content": user}),
+            serde_json::json!({"role": "assistant", "content": assistant}),
+        ]
+    }
+
+    #[test]
+    fn pure_chat_puts_heavy_gates_dormant() {
+        let config = Config::default();
+        let messages = chat_messages("你好，介紹一下這個專案", "這是 Agnes AI。");
+        let audits = run_all_gates(&config, &[], &messages);
+        assert_eq!(audits.len(), 22);
+        for name in ["MemoryEfficiencyReviewer", "SandboxRuntimeTester",
+                     "SecurityComplianceAuditor", "DefensiveCodingSpecialist"] {
+            let a = audits.iter().find(|a| a.agent_name == name).unwrap();
+            assert_eq!(a.verdict, VERDICT_DORMANT, "{} 應休眠", name);
+        }
+        let g22 = audits.iter().find(|a| a.agent_name == "OrchestratorAgent").unwrap();
+        assert_eq!(g22.verdict, "PASSED");
+        assert!(g22.reason.contains("休眠"));
+    }
+
+    #[test]
+    fn rs_write_activates_compile_gates() {
+        let mut config = Config::default();
+        config.general.project_mode = "global".into(); // 閘門內部 Skip，避免測試真跑 cargo
+        let tool_calls = vec![ToolCall {
+            name: "write_file".into(),
+            path: Some("src/lib.rs".into()),
+            content: "pub fn f() {}".into(),
+        }];
+        let messages = chat_messages("寫一個函式", "好的");
+        let audits = run_all_gates(&config, &tool_calls, &messages);
+        for name in ["MemoryEfficiencyReviewer", "SandboxRuntimeTester"] {
+            let a = audits.iter().find(|a| a.agent_name == name).unwrap();
+            assert_ne!(a.verdict, VERDICT_DORMANT, "{} 應激活", name);
+        }
+    }
+
+    #[test]
+    fn g17_rejects_claim_without_write_tool() {
+        let config = Config::default();
+        let messages = chat_messages("建立 main.rs", "已建立檔案 main.rs，內容如下。");
+        let audits = run_all_gates(&config, &[], &messages);
+        let g17 = audits.iter().find(|a| a.agent_name == "FactHallucinationAuditor").unwrap();
+        assert_eq!(g17.verdict, "REJECTED");
+        let g22 = audits.iter().find(|a| a.agent_name == "OrchestratorAgent").unwrap();
+        assert_eq!(g22.verdict, "REJECTED");
+        assert!(g22.reason.contains("FactHallucinationAuditor"));
+    }
+
+    #[test]
+    fn g18_rejects_oversized_md() {
+        let config = Config::default();
+        let big = "記".repeat(config.memory.md_token_cap + 100);
+        let tool_calls = vec![ToolCall {
+            name: "write_file".into(),
+            path: Some("Docs/huge.md".into()),
+            content: big,
+        }];
+        let messages = chat_messages("寫文件", "好的");
+        let audits = run_all_gates(&config, &tool_calls, &messages);
+        let g18 = audits.iter().find(|a| a.agent_name == "TokenOverlapAuditor").unwrap();
+        assert_eq!(g18.verdict, "REJECTED");
+        assert!(g18.reason.contains("md_token_cap"));
+    }
+
+    #[test]
+    fn distill_group_wakes_on_large_conversation() {
+        let config = Config::default();
+        let long = "上下文".repeat(config.memory.distill_trigger_delta / 2);
+        let messages = chat_messages(&long, "收到");
+        let audits = run_all_gates(&config, &[], &messages);
+        for name in ["ContextDistillerAlpha", "ContextDistillerBeta", "DistillationIntegrator"] {
+            let a = audits.iter().find(|a| a.agent_name == name).unwrap();
+            assert_eq!(a.verdict, "PASSED", "{} 應激活且通過", name);
+        }
+    }
 }

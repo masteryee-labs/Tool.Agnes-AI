@@ -131,6 +131,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS conversation_audits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            audited_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS conversation_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             conversation_id TEXT NOT NULL,
@@ -171,6 +180,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_messages_conv
             ON conversation_messages(conversation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_conv_audits
+            ON conversation_audits(conversation_id);
         ",
     )?;
 
@@ -184,10 +196,14 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 /// 全域模式 Session 的 project_id 哨兵值（不對應任何 projects 列）。
 pub const GLOBAL_PROJECT_ID: &str = "global";
 
+/// 多執行緒同檔競態下的寫入等待上限（rusqlite 預設 0 = 立即回 SQLITE_BUSY）
+pub const DB_BUSY_TIMEOUT_MS: u64 = 3000;
+
 /// Open a new Connection at the given path. Returns an error if the DB cannot
 /// be created / opened. Calls `init_db` automatically.
 pub fn open_connection(db_path: &Path) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
+    conn.busy_timeout(std::time::Duration::from_millis(DB_BUSY_TIMEOUT_MS))?;
     init_db(&conn)?;
     Ok(conn)
 }
@@ -355,6 +371,44 @@ pub fn add_audit_log(
         params![task_id, agent_name, verdict, reason],
     )?;
     Ok(())
+}
+
+/// 取代式寫入對話審查批次：清掉舊批次後整批寫入最新一輪（22 筆）。
+/// 注意：不可重用 audit_logs——其 task_id 外鍵指向 tasks(id)，而 rusqlite bundled
+/// SQLite 預設啟用外鍵；對話 id 不在 tasks 表，寫入會以 FOREIGN KEY constraint 失敗
+///（GUI 實機 QA 抓到的真實缺陷）。
+pub fn replace_conversation_audits(
+    conn: &Connection,
+    conversation_id: &str,
+    audits: &[(String, String, String)], // (agent_name, verdict, reason)
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM conversation_audits WHERE conversation_id = ?1",
+        params![conversation_id],
+    )?;
+    for (agent_name, verdict, reason) in audits {
+        conn.execute(
+            "INSERT INTO conversation_audits (conversation_id, agent_name, verdict, reason) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![conversation_id, agent_name, verdict, reason],
+        )?;
+    }
+    Ok(())
+}
+
+/// 讀回該對話最新一輪審查（agent_name, verdict, reason）。
+pub fn get_conversation_audits(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT agent_name, verdict, reason FROM conversation_audits \
+         WHERE conversation_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt.query_map(params![conversation_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect()
 }
 
 pub fn get_audit_logs_for_task(conn: &Connection, task_id: &str) -> Result<Vec<AuditLog>> {

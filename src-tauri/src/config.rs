@@ -200,6 +200,9 @@ pub struct GeneralConfig {
     pub language: String,           // "zh-TW", "en-US", "auto"
     #[serde(default = "default_locale_charset")]
     pub locale_charset: String,
+    /// 介面縮放倍率（egui pixels_per_point；高解析螢幕預設放大）
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
     #[serde(default)]
     pub active_project_id: Option<String>,
 }
@@ -208,6 +211,10 @@ fn default_work_mode() -> String { "project".to_string() }
 fn default_shell() -> String { "PowerShell".to_string() }
 fn default_language() -> String { "auto".to_string() }
 fn default_locale_charset() -> String { "en-US".to_string() }
+fn default_ui_scale() -> f32 { 1.25 }
+/// 介面縮放允許範圍（防止誤設成 0 讓視窗不可用）
+pub const UI_SCALE_MIN: f32 = 1.0;
+pub const UI_SCALE_MAX: f32 = 1.75;
 
 impl Default for GeneralConfig {
     fn default() -> Self {
@@ -216,6 +223,7 @@ impl Default for GeneralConfig {
             shell: "PowerShell".to_string(),
             language: "auto".to_string(),
             locale_charset: "en-US".to_string(),
+            ui_scale: default_ui_scale(),
             active_project_id: None,
         }
     }

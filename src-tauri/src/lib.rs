@@ -15,6 +15,7 @@ mod tests_integration;
 pub use config::Config;
 pub use config::McpServerConfig;
 pub use config::key_persistence;
+pub use config::{UI_SCALE_MAX, UI_SCALE_MIN};
 pub use db::*;
 pub use locale::*;
 pub use sandbox::*;
@@ -109,7 +110,7 @@ impl AppState {
         let http_client = Arc::new(Mutex::new(
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
-                .user_agent("Agnes-AI/0.3.0")
+                .user_agent("Agnes-AI/0.5.0")
                 .build()
                 .map_err(|e| format!("Failed to build pooled HTTP client: {}", e))?,
         ));
