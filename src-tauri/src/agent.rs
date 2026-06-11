@@ -376,6 +376,17 @@ impl AgentLoop {
             }
         }
 
+        // Claude 互通層：CLAUDE.md 專案規則 + .claude/skills 技能（確定性檔案解析，
+        // 修復迴圈外只算一次，0 API 成本）
+        let skills_context =
+            crate::skills::build_skills_system_prompt(&self.workspace_path, last_user_prompt);
+
+        // 已連線 MCP 伺服器的工具清單——不注入的話模型不知道 run_mcp 能呼叫什麼
+        let mcp_tools_context = {
+            let all_tools = mcp_manager.get_all_tools().await;
+            crate::skills::build_mcp_tools_prompt(&all_tools)
+        };
+
         let mut repair_attempts = 0;
         let max_repairs = self.config.api.max_repairs;
 
@@ -391,9 +402,26 @@ impl AgentLoop {
                 "content": AGNES_SYSTEM_PROMPT
             }));
             
-            // Inject RAG context as the second system message if it is not empty
+            // Claude 互通層與 RAG 依序排在主系統提示之後
+            let mut insert_at = 1;
+            if let Some(ctx) = &skills_context {
+                request_messages.insert(insert_at, serde_json::json!({
+                    "role": "system",
+                    "content": ctx,
+                }));
+                insert_at += 1;
+            }
+            if let Some(ctx) = &mcp_tools_context {
+                request_messages.insert(insert_at, serde_json::json!({
+                    "role": "system",
+                    "content": ctx,
+                }));
+                insert_at += 1;
+            }
+
+            // Inject RAG context as a system message if it is not empty
             if !rag_context.is_empty() {
-                request_messages.insert(1, serde_json::json!({
+                request_messages.insert(insert_at, serde_json::json!({
                     "role": "system",
                     "content": format!("Here is relevant historical context retrieved from memory:\n{}", rag_context)
                 }));

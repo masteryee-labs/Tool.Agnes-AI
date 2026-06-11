@@ -15,6 +15,16 @@ pub const AGENTS_DIR: &str = ".agent/rules";
 pub const DEFAULT_LOCALE_CHARSET: &str = "en-US";
 pub const GITIGNORE_LINE: &str = "# Agnes-AI generated\nconfig.local.toml\n*.db\n.agnes/\n";
 
+// ─── Claude 互通層上限（skills.rs）────────────────────────────────────────────
+/// 注入系統提示的單一 SKILL.md 內文字元上限
+pub const SKILL_BODY_MAX_CHARS: usize = 8000;
+/// CLAUDE.md 專案規則注入字元上限
+pub const CLAUDE_MD_MAX_CHARS: usize = 8000;
+/// 技能清單最多載入數
+pub const SKILLS_LIST_MAX: usize = 50;
+/// MCP 工具清單注入系統提示的字元上限
+pub const MCP_TOOLS_PROMPT_MAX_CHARS: usize = 4000;
+
 // ─── 金鑰本機持久化 ──────────────────────────────────────────────────────────
 
 /// 金鑰安全工具：讀取 / 寫入 config.local.toml，並確保 .gitignore 已屏蔽。
@@ -217,7 +227,11 @@ impl Default for GeneralConfig {
 pub struct McpServerConfig {
     pub name: String,
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    /// 傳給伺服器行程的環境變數（Claude .mcp.json 的 env 欄位）
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
     #[serde(default = "default_mcp_enabled")]
     pub enabled: bool,
 }

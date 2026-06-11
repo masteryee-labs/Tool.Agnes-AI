@@ -27,7 +27,8 @@
 - `db.rs` — SQLite 確定性狀態機：tasks / execution_logs / audit_logs / projects / conversations
 - `config.rs` — `config.local.toml` 金鑰隔離、`ensure_gitignore` 自動屏蔽、全組態結構體（零 Magic Number）
 - `locale.rs` — Windows `chcp 65001` / Unix `LANG=zh_TW.UTF-8` 語系校準
-- `mcp.rs` — MCP 伺服器管理
+- `mcp.rs` — MCP 伺服器管理（含 env 注入；GUI 啟動時自動拉起啟用的伺服器）
+- `skills.rs` — Claude 互通層：`.claude/skills/*/SKILL.md` 技能、`CLAUDE.md` 規則、`.mcp.json` MCP 設定的確定性解析與系統提示注入
 - `ui/` — egui 前端原型（17 代理人側欄、Projects、工作區）
 - `.agent/rules/` — core.agents.toon（17 代理人）、security_policies.toon、confirmation_gate.toon
 - `tests_integration.rs` — 636 行整合測試

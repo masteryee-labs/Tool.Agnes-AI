@@ -126,6 +126,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS conversations (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT '',
+            project_id TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -173,8 +174,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
         ",
     )?;
 
+    // 既有資料庫遷移：舊版 conversations 無 project_id 欄。
+    // ALTER 對已有該欄的表會失敗——該錯誤即「無需遷移」，安全忽略。
+    let _ = conn.execute("ALTER TABLE conversations ADD COLUMN project_id TEXT", []);
+
     Ok(())
 }
+
+/// 全域模式 Session 的 project_id 哨兵值（不對應任何 projects 列）。
+pub const GLOBAL_PROJECT_ID: &str = "global";
 
 /// Open a new Connection at the given path. Returns an error if the DB cannot
 /// be created / opened. Calls `init_db` automatically.
@@ -375,11 +383,15 @@ fn query_audit_logs(stmt: &mut rusqlite::Statement, task_id: &str) -> Result<Vec
 
 // ─── Conversation persistence ─────────────────────────────────────────────────
 
-pub fn create_conversation(conn: &Connection, title: &str) -> Result<String> {
+pub fn create_conversation(
+    conn: &Connection,
+    title: &str,
+    project_id: Option<&str>,
+) -> Result<String> {
     let conv_id = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO conversations (id, title) VALUES (?1, ?2)",
-        params![conv_id, title],
+        "INSERT INTO conversations (id, title, project_id) VALUES (?1, ?2, ?3)",
+        params![conv_id, title, project_id],
     )?;
     Ok(conv_id)
 }
@@ -403,22 +415,40 @@ pub fn add_conversation_message(
     Ok(())
 }
 
-pub fn get_conversations(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub updated_at: String,
+    pub project_id: Option<String>,
+}
+
+pub fn get_conversations(conn: &Connection) -> Result<Vec<ConversationSummary>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC"
+        "SELECT id, title, updated_at, project_id FROM conversations ORDER BY updated_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-        ))
+        Ok(ConversationSummary {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            updated_at: row.get(2)?,
+            project_id: row.get(3)?,
+        })
     })?;
     let mut results = Vec::new();
     for row_result in rows {
         results.push(row_result?);
     }
     Ok(results)
+}
+
+/// 歷史資料補綁：把尚無歸屬的舊對話掛到指定專案下（升級既有資料庫用）。
+pub fn assign_orphan_conversations(conn: &Connection, project_id: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE conversations SET project_id = ?1 WHERE project_id IS NULL",
+        params![project_id],
+    )?;
+    Ok(n)
 }
 
 pub fn get_messages_for_conversation(

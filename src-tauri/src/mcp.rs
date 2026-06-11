@@ -27,6 +27,7 @@ impl McpServerProcess {
     pub async fn new(config: &McpServerConfig) -> Result<Self, String> {
         let mut cmd = Command::new(&config.command);
         cmd.args(&config.args)
+            .envs(&config.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
