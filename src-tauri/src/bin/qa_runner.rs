@@ -12,6 +12,8 @@ use std::process::Command;
 const MAX_STEPS: usize = 6;
 /// QA 任務的 API 逾時（生成大檔需要較長時間）
 const QA_API_TIMEOUT_SECS: u64 = 120;
+/// cargo test 失敗時的自愈修復輪數上限（沙盒硬性對齊 → 真實錯誤回饋）
+const MAX_TEST_REPAIRS: usize = 2;
 
 struct QaResult {
     name: &'static str,
@@ -38,22 +40,75 @@ fn long_path(p: &Path) -> PathBuf {
     }
 }
 
-/// 在 workspace 中跑 cargo test，回傳 (exit_code, stderr 摘要)。真實證據，不經模型。
+/// 在 workspace 中跑 cargo test，回傳 (exit_code, 失敗摘要)。真實證據，不經模型。
+/// 測試斷言失敗印在 stdout、編譯錯誤在 stderr——兩者都擷取供自愈回饋。
 fn cargo_test_in(dir: &Path) -> (i32, String) {
     let output = Command::new("cmd")
         .arg("/C")
-        .arg("chcp 65001 >nul && cargo test --quiet")
+        .arg("chcp 65001 >nul && cargo test")
         .current_dir(dir)
         .output();
     match output {
         Ok(out) => {
             let code = out.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let head: String = stderr.lines().take(8).collect::<Vec<_>>().join("\n");
-            (code, head)
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut summary: Vec<String> = stderr.lines()
+                .filter(|l| l.contains("error") || l.contains("warning: unused"))
+                .take(10)
+                .map(str::to_string)
+                .collect();
+            let mut fail_context = 0usize;
+            for l in stdout.lines() {
+                let hit = l.contains("FAILED") || l.contains("panicked") || l.contains("assertion");
+                if hit {
+                    fail_context = 3;
+                }
+                if hit || (fail_context > 0 && (l.contains("left:") || l.contains("right:"))) {
+                    summary.push(l.to_string());
+                    fail_context = fail_context.saturating_sub(1);
+                }
+                if summary.len() >= 24 {
+                    break;
+                }
+            }
+            (code, summary.join("\n"))
         }
         Err(e) => (-1, format!("cargo 啟動失敗: {}", e)),
     }
+}
+
+/// 沙盒硬性對齊 + 自愈：cargo test 失敗時把真實錯誤砸回模型重寫，最多 MAX_TEST_REPAIRS 輪。
+/// 回傳 (最終 exit_code, 最終摘要, 修復輪數, 追加步數, 追加 tokens, 追加 log)。
+async fn heal_until_tests_pass(
+    config: &Config,
+    ws: &Path,
+    db: &Path,
+) -> (i32, String, usize, usize, u64, Vec<String>) {
+    let (mut code, mut summary) = cargo_test_in(ws);
+    let mut rounds = 0;
+    let mut extra_steps = 0;
+    let mut extra_tokens = 0;
+    let mut extra_log = Vec::new();
+
+    while code != 0 && rounds < MAX_TEST_REPAIRS {
+        rounds += 1;
+        let repair_prompt = format!(
+            "[沙盒硬性對齊] 此 Rust crate 的 cargo test 失敗，Exit Code {}。真實錯誤輸出：\n{}\n\
+             請先用 read_file 檢視相關的 src/ 檔案，找出實作與測試期望不一致之處，\
+             以最小修改修復（修正錯誤的實作或修正錯誤的測試期望），用 write_file 重新寫入受影響檔案。",
+            code, summary,
+        );
+        let (s, t, log) = run_agent_task(config, ws, db, &repair_prompt).await;
+        extra_steps += s;
+        extra_tokens += t;
+        extra_log.push(format!("-- 自愈第 {} 輪 --", rounds));
+        extra_log.extend(log);
+        let (c2, s2) = cargo_test_in(ws);
+        code = c2;
+        summary = s2;
+    }
+    (code, summary, rounds, extra_steps, extra_tokens, extra_log)
 }
 
 /// 跑一個多步代理任務迴圈：把工具結果回饋給模型直到沒有新工具呼叫。
@@ -151,15 +206,20 @@ async fn qa_medium(config: &Config, base: &Path, db: &Path) -> QaResult {
     let prompt = "這是一個既有的 Rust crate。請覆寫 src/main.rs：實作 fn fib(n: u64) -> u64（迭代版，禁止遞迴）、\
                   fn main() 印出 fib(10)，並加入 #[cfg(test)] 模組驗證 fib(0)==0、fib(1)==1、fib(10)==55。\
                   代碼必須 100% 完整可編譯。";
-    let (steps, tokens, log) = run_agent_task(config, &ws, db, prompt).await;
+    let (steps, tokens, mut log) = run_agent_task(config, &ws, db, prompt).await;
 
-    let (code, stderr) = cargo_test_in(&ws);
+    let (code, summary, rounds, extra_steps, extra_tokens, extra_log) =
+        heal_until_tests_pass(config, &ws, db).await;
+    log.extend(extra_log);
     QaResult {
         name: "medium（Rust 函式 + 單元測試）",
         passed: code == 0,
-        steps_used: steps,
-        tokens,
-        detail: format!("cargo test exit={}\n{}\n{}", code, stderr, log.join("\n")),
+        steps_used: steps + extra_steps,
+        tokens: tokens + extra_tokens,
+        detail: format!(
+            "cargo test exit={} 自愈輪數={}\n{}\n{}",
+            code, rounds, summary, log.join("\n"),
+        ),
     }
 }
 
@@ -179,19 +239,55 @@ async fn qa_large(config: &Config, base: &Path, db: &Path) -> QaResult {
                   (2) src/strings.rs：pub fn reverse(s:&str)->String 與 pub fn count_cjk(s:&str)->usize（計算中日韓字元數），含測試（必須包含繁體中文測試字串）；\
                   (3) src/lib.rs：pub mod math; pub mod strings;。\
                   每個檔案都要 100% 完整可編譯，測試必須能通過。";
-    let (steps, tokens, log) = run_agent_task(config, &ws, db, prompt).await;
+    let (steps, tokens, mut log) = run_agent_task(config, &ws, db, prompt).await;
 
     let files = ["src/lib.rs", "src/math.rs", "src/strings.rs"];
     let existing = files.iter().filter(|f| ws.join(f).exists()).count();
-    let (code, stderr) = cargo_test_in(&ws);
+    let (code, summary, rounds, extra_steps, extra_tokens, extra_log) =
+        heal_until_tests_pass(config, &ws, db).await;
+    log.extend(extra_log);
     QaResult {
         name: "large（多檔函式庫 + CJK 測試）",
         passed: existing == files.len() && code == 0,
+        steps_used: steps + extra_steps,
+        tokens: tokens + extra_tokens,
+        detail: format!(
+            "files {}/{} cargo test exit={} 自愈輪數={}\n{}\n{}",
+            existing, files.len(), code, rounds, summary, log.join("\n"),
+        ),
+    }
+}
+
+/// 自愈展示：植入「實作與測試不一致」的壞 crate，驗證真實錯誤回饋 → 模型修復 → 測試轉綠。
+async fn qa_heal_demo(config: &Config, base: &Path, db: &Path) -> QaResult {
+    let ws = base.join("heal_demo");
+    ensure_dir(&ws);
+    let ws = long_path(&ws);
+    std::fs::write(
+        ws.join("Cargo.toml"),
+        "[package]\nname = \"qa_heal\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    ).unwrap();
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    // 故意的缺陷：double 實作成 +1，測試期望 *2 —— cargo test 必然失敗
+    std::fs::write(
+        ws.join("src").join("lib.rs"),
+        "pub fn double(x: i64) -> i64 {\n    x + 1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn test_double() {\n        assert_eq!(double(2), 4);\n        assert_eq!(double(10), 20);\n    }\n}\n",
+    ).unwrap();
+
+    let (before_code, before_summary) = cargo_test_in(&ws);
+    let (code, summary, rounds, steps, tokens, log) =
+        heal_until_tests_pass(config, &ws, db).await;
+
+    QaResult {
+        name: "heal-demo（植入缺陷 → 真實錯誤回饋 → 模型自愈）",
+        passed: before_code != 0 && code == 0 && rounds >= 1,
         steps_used: steps,
         tokens,
         detail: format!(
-            "files {}/{} cargo test exit={}\n{}\n{}",
-            existing, files.len(), code, stderr, log.join("\n"),
+            "修復前 exit={}（{}）\n修復後 exit={} 自愈輪數={}\n{}\n{}",
+            before_code,
+            before_summary.lines().next().unwrap_or(""),
+            code, rounds, summary, log.join("\n"),
         ),
     }
 }
@@ -233,6 +329,10 @@ async fn main() {
     }
     if filter == "all" || filter == "large" {
         results.push(qa_large(&config, &base, &db_path).await);
+        println!("[{}] {}", if results.last().unwrap().passed { "PASS" } else { "REJECT" }, results.last().unwrap().name);
+    }
+    if filter == "heal" {
+        results.push(qa_heal_demo(&config, &base, &db_path).await);
         println!("[{}] {}", if results.last().unwrap().passed { "PASS" } else { "REJECT" }, results.last().unwrap().name);
     }
 
