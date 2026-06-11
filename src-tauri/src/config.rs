@@ -134,16 +134,21 @@ pub struct SandboxConfig {
     pub timeout_seconds: u64,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 沙盒對齊失敗時回饋給模型的 stderr 行數上限（Delta-only 回饋）
+    #[serde(default = "default_stderr_feedback_lines")]
+    pub stderr_feedback_lines: usize,
 }
 
 fn default_timeout() -> u64 { DEFAULT_TIMEOUT_SECONDS }
 fn default_max_retries() -> u32 { DEFAULT_MAX_RETRIES }
+fn default_stderr_feedback_lines() -> usize { 20 }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             max_retries: DEFAULT_MAX_RETRIES,
+            stderr_feedback_lines: default_stderr_feedback_lines(),
         }
     }
 }

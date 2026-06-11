@@ -1,5 +1,30 @@
 # 09 — 真實 QA 報告（2026-06-11）
 
+## 第四輪：親手操作寫碼 + 規範審核（computer-use）
+
+親手在 GUI 輸入寫碼任務、送出、Agnes 真實 API 寫出 `.rs` 檔，再以審核員身分逐條對照 /teamwork-preview 規範。
+
+**審核判決（PASS/REJECT 結構化）：**
+
+| 規範條目 | 判定 | 證據 |
+|---|---|---|
+| 零 AI 腔 / 金鑰隔離 / 零 Magic Number / 路徑圈禁 | [PASS] | 掃描 0 命中；檔案未逃出工作區 |
+| 代碼 100% 可編譯 | [REJECT→修復] | 首版缺生命週期標註（E0106）。修復：system prompt 新增「路徑不加工作區前綴」規則 + `check_rs_compiles`（rustc metadata 單檔編譯對齊） |
+| 沙盒 Exit-Code 強對齊（0 虛假回報） | [REJECT→修復] | 模型測試斷言邏輯錯誤（rustc --test 跑出 4 passed/3 failed）但 GUI 報 SUCCESS。根因：metadata 編譯不評估 cfg(test) 代碼。修復：`run_rs_tests`（rustc --test 編譯+執行測試取真實 Exit Code），接入 `post_write_alignment` 兩階段（編譯→測試），失敗砸回 rustc/測試錯誤自愈重寫 |
+
+**修復後驗證：**
+- `check_rs_compiles` 攔截 E0106、跳過跨檔引用（test_check_rs_compiles_*）
+- `run_rs_tests` 攔截測試斷言失敗、跳過無測試/跨檔檔案（test_run_rs_tests_*）
+- 引擎端到端：qa_runner medium（自包含單檔 + 測試）經 post_write_alignment 後 PASS
+- 69/69 單元測試、clippy 0、release 建置通過
+
+**附帶交付：對話收合功能（對標 Claude/Codex/Antigravity）**
+- 助理訊息中 ``` 碼塊、`<write_file>`/`<run_command>`/`<run_mcp>` 工具區塊超過 8 行自動收合為「標題（N 行）」可展開列
+- 工具執行結果超過 8 行收合為「首行摘要…（N 行）」
+- 親手操作實測：169 行 write_file 區塊正確摺疊，不洗版
+
+**環境限制（誠實記錄）：** Agnes API 對測試金鑰的 reqwest 連線層間歇不穩（多次 `error sending request`/429），GUI 端到端自愈（需連續多次 API 呼叫）數度中斷；引擎層機制以 headless qa_runner 與單元測試完成驗證。Python urllib 探測端點穩定（0.1s/401），研判為 TLS keep-alive 層間歇問題，非應用程式缺陷。
+
 ## 第三輪：親手操作 GUI（computer-use，使用者授權僅控制本應用程式）
 
 操作方式：真實滑鼠點擊與鍵盤輸入驅動應用程式視窗（截圖時其他視窗由系統遮罩）。

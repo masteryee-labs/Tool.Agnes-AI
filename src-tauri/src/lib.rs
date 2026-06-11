@@ -18,7 +18,7 @@ pub use locale::*;
 pub use sandbox::*;
 pub use orchestrator::Orchestrator;
 pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLevel};
-pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line};
+pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
 pub use mcp::McpManager;
 pub use memory::*;
 pub use validation::*;

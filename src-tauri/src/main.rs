@@ -1631,7 +1631,7 @@ impl eframe::App for AgnesApp {
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap); // Enable word wrapping globally in scroll area
                     {
-                        for msg in &st.active_messages {
+                        for (msg_idx, msg) in st.active_messages.iter().enumerate() {
                             let is_user = msg.role == "user";
                             let is_tool = msg.role == "tool";
                             
@@ -1671,15 +1671,9 @@ impl eframe::App for AgnesApp {
                                     );
                                     ui.add_space(4.0);
                                     if is_tool {
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(&msg.content)
-                                                    .font(egui::FontId::monospace(15.5))
-                                            )
-                                            .wrap()
-                                        );
+                                        render_collapsible_tool_output(ui, &msg.content, msg_idx);
                                     } else {
-                                        render_message_content(ui, &msg.content);
+                                        render_message_content(ui, &msg.content, msg_idx);
                                     }
                                 });
                             ui.add_space(8.0);
@@ -1732,51 +1726,186 @@ impl eframe::App for AgnesApp {
     }
 }
 
-/// Render assistant message text: ``` fenced blocks as monospace cards, rest as wrapped labels.
-fn render_message_content(ui: &mut egui::Ui, content: &str) {
-    let mut in_code = false;
-    let mut buffer = String::new();
+// ─── 訊息渲染：收合式區塊（對標 Claude/Codex/Antigravity 摺疊長輸出）──────────
 
-    let flush = |ui: &mut egui::Ui, text: &str, code: bool| {
-        if text.trim().is_empty() {
-            return;
-        }
-        if code {
-            egui::Frame::default()
-                .fill(egui::Color32::from_rgb(20, 24, 33))
-                .corner_radius(4)
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(text.trim_end())
-                                .font(egui::FontId::monospace(13.5))
-                                .color(TEXT_PRIMARY),
-                        )
-                        .wrap(),
-                    );
-                });
-        } else {
+/// 超過此行數的碼塊/工具輸出預設收合
+const COLLAPSE_LINES_THRESHOLD: usize = 8;
+/// 收合標題的摘要字元數
+const COLLAPSE_SUMMARY_CHARS: usize = 60;
+
+fn emit_text(ui: &mut egui::Ui, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text.trim_end()).size(15.0).color(TEXT_PRIMARY),
+        )
+        .wrap(),
+    );
+}
+
+fn emit_mono_frame(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::default()
+        .fill(egui::Color32::from_rgb(20, 24, 33))
+        .corner_radius(4)
+        .inner_margin(8.0)
+        .show(ui, |ui| {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(text.trim_end()).size(15.0).color(TEXT_PRIMARY),
+                    egui::RichText::new(text.trim_end())
+                        .font(egui::FontId::monospace(13.5))
+                        .color(TEXT_PRIMARY),
                 )
                 .wrap(),
             );
+        });
+}
+
+/// 短內容直接顯示；長內容收合為「標題（N 行）」可展開列。
+fn emit_collapsible(ui: &mut egui::Ui, title: &str, body: &str, salt: (usize, usize)) {
+    let lines = body.lines().count();
+    if lines <= COLLAPSE_LINES_THRESHOLD {
+        if !title.is_empty() {
+            ui.label(egui::RichText::new(title).size(12.0).color(TEXT_SECONDARY));
         }
-    };
+        emit_mono_frame(ui, body);
+        return;
+    }
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("{}（{} 行）", title, lines))
+            .size(12.5)
+            .color(TEXT_SECONDARY),
+    )
+    .id_salt(("collapse_blk", salt))
+    .default_open(false)
+    .show(ui, |ui| emit_mono_frame(ui, body));
+}
+
+fn extract_attr(line: &str, attr: &str) -> String {
+    let needle = format!("{}=\"", attr);
+    line.find(&needle)
+        .and_then(|i| {
+            let rest = &line[i + needle.len()..];
+            rest.find('"').map(|j| rest[..j].to_string())
+        })
+        .unwrap_or_default()
+}
+
+/// 助理訊息渲染：一般文字直出；``` 碼塊與工具呼叫 XML 區塊收合（避免長文洗版）。
+fn render_message_content(ui: &mut egui::Ui, content: &str, msg_idx: usize) {
+    let mut text_buf = String::new();
+    let mut block_buf = String::new();
+    let mut in_code = false;
+    let mut tool_close: Option<(String, String)> = None; // (結束標籤, 收合標題)
+    let mut block_idx = 0usize;
 
     for line in content.lines() {
-        if line.trim_start().starts_with("```") {
-            flush(ui, &buffer, in_code);
-            buffer.clear();
-            in_code = !in_code;
+        // 工具區塊內：累積直到結束標籤
+        if tool_close.is_some() {
+            let hit_close = {
+                let (close_tag, _) = tool_close.as_ref().unwrap();
+                line.trim_start().starts_with(close_tag.as_str())
+            };
+            if hit_close {
+                let (_, title) = tool_close.take().unwrap();
+                emit_collapsible(ui, &title, &block_buf, (msg_idx, block_idx));
+                block_idx += 1;
+                block_buf.clear();
+            } else {
+                block_buf.push_str(line);
+                block_buf.push('\n');
+            }
             continue;
         }
-        buffer.push_str(line);
-        buffer.push('\n');
+        // 碼塊內：累積直到 ``` 結束
+        if in_code {
+            if line.trim_start().starts_with("```") {
+                emit_collapsible(ui, "📄 程式碼", &block_buf, (msg_idx, block_idx));
+                block_idx += 1;
+                block_buf.clear();
+                in_code = false;
+            } else {
+                block_buf.push_str(line);
+                block_buf.push('\n');
+            }
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            emit_text(ui, &text_buf);
+            text_buf.clear();
+            in_code = true;
+        } else if trimmed.starts_with("<write_file") {
+            emit_text(ui, &text_buf);
+            text_buf.clear();
+            let path = extract_attr(trimmed, "path");
+            tool_close = Some(("</write_file>".into(), format!("✍ write_file：{}", path)));
+        } else if trimmed.starts_with("<run_command>") {
+            emit_text(ui, &text_buf);
+            text_buf.clear();
+            tool_close = Some(("</run_command>".into(), "⚡ run_command".into()));
+        } else if trimmed.starts_with("<run_mcp") {
+            emit_text(ui, &text_buf);
+            text_buf.clear();
+            tool_close = Some(("</run_mcp>".into(), "🔌 run_mcp".into()));
+        } else if trimmed.starts_with("<read_file") {
+            emit_text(ui, &text_buf);
+            text_buf.clear();
+            let path = extract_attr(trimmed, "path");
+            ui.label(
+                egui::RichText::new(format!("📖 read_file：{}", path))
+                    .size(12.5)
+                    .color(TEXT_SECONDARY),
+            );
+        } else {
+            text_buf.push_str(line);
+            text_buf.push('\n');
+        }
     }
-    flush(ui, &buffer, in_code);
+
+    // 尾端未閉合的區塊照樣輸出
+    if let Some((_, title)) = tool_close.take() {
+        emit_collapsible(ui, &title, &block_buf, (msg_idx, block_idx));
+    } else if in_code {
+        emit_collapsible(ui, "📄 程式碼", &block_buf, (msg_idx, block_idx));
+    }
+    emit_text(ui, &text_buf);
+}
+
+/// 工具執行結果渲染：短結果直出，長結果收合（標題=首行摘要）。
+fn render_collapsible_tool_output(ui: &mut egui::Ui, content: &str, msg_idx: usize) {
+    let lines = content.lines().count();
+    if lines <= COLLAPSE_LINES_THRESHOLD {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(content)
+                    .font(egui::FontId::monospace(13.5))
+                    .color(TEXT_PRIMARY),
+            )
+            .wrap(),
+        );
+        return;
+    }
+    let summary = truncate_chars(content.lines().next().unwrap_or(""), COLLAPSE_SUMMARY_CHARS);
+    egui::CollapsingHeader::new(
+        egui::RichText::new(format!("{}…（{} 行）", summary, lines))
+            .size(12.5)
+            .color(TEXT_SECONDARY),
+    )
+    .id_salt(("tool_out", msg_idx))
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(content)
+                    .font(egui::FontId::monospace(13.0))
+                    .color(TEXT_PRIMARY),
+            )
+            .wrap(),
+        );
+    });
 }
 
 fn main() {
