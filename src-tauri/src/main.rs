@@ -222,30 +222,39 @@ fn settings_row(
         .corner_radius(8)
         .inner_margin(14.0)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let control_width = 220.0;
-                ui.vertical(|ui| {
-                    ui.set_width((ui.available_width() - control_width).max(200.0));
-                    ui.label(egui::RichText::new(title).size(15.0).color(TEXT_PRIMARY).strong());
-                    if !desc.is_empty() {
-                        ui.label(egui::RichText::new(desc).size(12.5).color(TEXT_SECONDARY));
-                    }
-                });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), control);
-            });
+            // egui 正規左右佈局：左標題描述、右控制項
+            egui::Sides::new().show(
+                ui,
+                |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_max_width((ui.available_width() - 240.0).max(200.0));
+                        ui.label(egui::RichText::new(title).size(15.0).color(TEXT_PRIMARY).strong());
+                        if !desc.is_empty() {
+                            ui.label(egui::RichText::new(desc).size(12.5).color(TEXT_SECONDARY));
+                        }
+                    });
+                },
+                control,
+            );
         });
     ui.add_space(8.0);
     true
 }
 
 /// Codex 風格 toggle 開關。
+/// 以 Button 為互動基底（allocate_exact_size 的手動命中區在部分巢狀版面收不到點擊），
+/// 外觀由自訂繪製覆蓋。
 fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-    let desired_size = egui::vec2(40.0, 22.0);
-    let (rect, mut response) = ui.allocate_exact_size(desired_size, egui::Sense::click());
+    let desired_size = egui::vec2(44.0, 24.0);
+    let mut response = ui.add_sized(
+        desired_size,
+        egui::Button::new("").frame(false),
+    );
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
     }
+    let rect = response.rect;
     let how_on = ui.ctx().animate_bool(response.id, *on);
     let bg = egui::Color32::from_rgb(
         (60.0 + how_on * (43.0 - 60.0)) as u8,
@@ -261,6 +270,15 @@ fn toggle_switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
         egui::Color32::WHITE,
     );
     response
+}
+
+/// 設定導航項：以 Button 為基底的可選擇列（selectable_label 在此面板收不到點擊）。
+fn nav_item(ui: &mut egui::Ui, selected: bool, label: String) -> egui::Response {
+    let fill = if selected { egui::Color32::from_rgb(40, 60, 100) } else { egui::Color32::TRANSPARENT };
+    ui.add_sized(
+        egui::vec2(ui.available_width(), 26.0),
+        egui::Button::new(egui::RichText::new(label).size(13.5)).fill(fill).corner_radius(6),
+    )
 }
 
 // ─── Main App ────────────────────────────────────────────────────────────────
@@ -518,9 +536,10 @@ impl AgnesApp {
                     (3, "🔒", "security"),
                 ];
                 for (idx, icon, key) in personal {
-                    if ui.selectable_label(
+                    if nav_item(
+                        ui,
                         st.settings_section == *idx,
-                        egui::RichText::new(format!("{}  {}", icon, t(key, lang))).size(13.5),
+                        format!("{}  {}", icon, t(key, lang)),
                     ).clicked() {
                         st.settings_section = *idx;
                     }
@@ -529,22 +548,28 @@ impl AgnesApp {
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(t("integrations", lang)).size(12.0).color(TEXT_MUTED));
                 ui.add_space(4.0);
-                if ui.selectable_label(
+                if nav_item(
+                    ui,
                     st.settings_section == 4,
-                    egui::RichText::new(format!("🔌  {}", t("mcp_servers", lang))).size(13.5),
+                    format!("🔌  {}", t("mcp_servers", lang)),
                 ).clicked() {
                     st.settings_section = 4;
                 }
             });
 
         // ── 右側：設定內容 ──
+        // 注意：用樸素的 horizontal+vertical 置中。vertical_centered+set_max_width+
+        // 內層 with_layout 的巢狀會讓子元件繪製正常但互動矩形被裁掉（點擊全部失效）。
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.add_space(24.0);
-                let inner_width = ui.available_width().min(860.0);
-                ui.vertical_centered(|ui| {
-                    ui.set_max_width(inner_width);
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                let total = ui.available_width();
+                let inner = total.min(860.0);
+                let margin = ((total - inner) / 2.0).max(24.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    ui.vertical(|ui| {
+                        ui.set_width(inner - margin);
                         self.render_settings_section(ui, &mut st, lang);
                     });
                 });
@@ -589,7 +614,7 @@ impl AgnesApp {
                             } else {
                                 egui::Stroke::new(1.0, BORDER)
                             };
-                            let resp = egui::Frame::default()
+                            let frame_resp = egui::Frame::default()
                                 .fill(BG_CARD)
                                 .stroke(stroke)
                                 .corner_radius(10)
@@ -607,8 +632,14 @@ impl AgnesApp {
                                             ui.label(egui::RichText::new(mark).size(13.0));
                                         });
                                     });
-                                }).response;
-                            if resp.interact(egui::Sense::click()).clicked() {
+                                });
+                            // 顯式唯一 Id 的命中區，覆蓋整張卡片
+                            let resp = ui.interact(
+                                frame_resp.response.rect,
+                                ui.id().with(("work_mode_card", mode)),
+                                egui::Sense::click(),
+                            );
+                            if resp.clicked() {
                                 st.work_mode = mode.to_string();
                                 cfg.general.project_mode = mode.to_string();
                                 cfg_changed = true;
@@ -1160,6 +1191,8 @@ impl AgnesApp {
                         *pending = Some(PendingState {
                             pending_tools:    step.executed_tools,
                             pending_response: step.response_text,
+                            workspace_path:   agent_loop.workspace_path.to_string_lossy().to_string(),
+                            conversation_id:  conversation_id.clone(),
                         });
                     }
                 }
@@ -1479,19 +1512,36 @@ impl eframe::App for AgnesApp {
                     ui.horizontal(|ui| {
                         if ui.button("✓ Approve").clicked() {
                             let app_state = self.app_state.clone();
+                            let ui_state = self.ui_state.clone();
                             let ctx2 = ctx.clone();
                             self.app_state.engine_runtime.spawn(async move {
-                                let mut lock = app_state.pending_state.lock().await;
-                                if let Some(ref p) = *lock {
+                                let taken = app_state.pending_state.lock().await.take();
+                                if let Some(p) = taken {
+                                    // 沿用送出當下的工作區——空工作區會讓路徑圈禁失效
                                     let lp = AgentLoop::new(
                                         app_state.config.lock().unwrap().clone(),
-                                        String::new(),
+                                        p.workspace_path.clone(),
                                     );
+                                    let mut results = Vec::new();
                                     for tool in &p.pending_tools {
-                                        let _ = lp.execute_tool(tool, &app_state.mcp_manager).await;
+                                        results.push(lp.execute_tool(tool, &app_state.mcp_manager).await);
+                                    }
+                                    // 結果入庫 + 顯示於聊天流
+                                    if let Ok(conn) = Connection::open(&app_state.db_path) {
+                                        for r in &results {
+                                            let _ = app_lib::add_conversation_message(
+                                                &conn, &p.conversation_id, "tool", r,
+                                            );
+                                        }
+                                    }
+                                    let mut st = ui_state.lock().unwrap();
+                                    for r in results {
+                                        st.active_messages.push(ChatMessage {
+                                            role: "tool".into(),
+                                            content: r,
+                                        });
                                     }
                                 }
-                                *lock = None;
                                 ctx2.request_repaint();
                             });
                         }
@@ -1554,9 +1604,16 @@ impl eframe::App for AgnesApp {
                 });
                 ui.add_space(28.0);
                 let mut send = false;
-                ui.vertical_centered(|ui| {
-                    ui.set_max_width(760.0);
-                    send = self.render_input_card(ui, &mut st, is_running, &lang);
+                // 樸素置中（vertical_centered+set_max_width 巢狀會吃掉子元件點擊）
+                let total = ui.available_width();
+                let inner = total.min(760.0);
+                let margin = ((total - inner) / 2.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    ui.vertical(|ui| {
+                        ui.set_width(inner);
+                        send = self.render_input_card(ui, &mut st, is_running, &lang);
+                    });
                 });
                 if send {
                     drop(st);
@@ -1651,11 +1708,17 @@ impl eframe::App for AgnesApp {
 
             // 底部釘住輸入卡（Codex / Antigravity 2.0 風格）
             let mut send = false;
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                 ui.add_space(8.0);
-                ui.vertical_centered(|ui| {
-                    ui.set_max_width(860.0);
-                    send = self.render_input_card(ui, &mut st, is_running, &lang);
+                let total = ui.available_width();
+                let inner = total.min(860.0);
+                let margin = ((total - inner) / 2.0).max(0.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(margin);
+                    ui.vertical(|ui| {
+                        ui.set_width(inner);
+                        send = self.render_input_card(ui, &mut st, is_running, &lang);
+                    });
                 });
             });
             if send {

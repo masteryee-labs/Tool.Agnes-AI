@@ -208,7 +208,6 @@ async fn main() {
     }
     // QA 模式：自動審查（工具直接執行，仍過 22-gate 驗證）+ 專案模式 + 延長 API 逾時
     config.security.auto_review = true;
-    config.security.require_approval = true;
     config.general.project_mode = "project".to_string();
     config.api.timeout_seconds = QA_API_TIMEOUT_SECS;
 

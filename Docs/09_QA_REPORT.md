@@ -1,5 +1,20 @@
 # 09 — 真實 QA 報告（2026-06-11）
 
+## 第三輪：親手操作 GUI（computer-use，使用者授權僅控制本應用程式）
+
+操作方式：真實滑鼠點擊與鍵盤輸入驅動應用程式視窗（截圖時其他視窗由系統遮罩）。
+完整走過：輸入任務 → 送出 → API 回應 → 待確認面板 → 人工核准 → 執行 → 結果顯示。
+
+**親手操作抓到並修復的 3 個缺陷：**
+
+| # | 缺陷 | 嚴重度 | 修復 |
+|---|---|---|---|
+| 1 | 核准語意：`require_approval && !auto_review`——使用者 config 中 require_approval=false（舊設定頁誤存），**核准流程永遠不可達** | 高 | 改為 `!auto_review \|\| 全域模式`（全域一律逐項核准，對齊 confirmation_gate.toon） |
+| 2 | 核准執行用 `String::new()` 當工作區——**路徑圈禁完全失效**，實測檔案逃逸寫到倉庫根目錄；結果亦未入庫未顯示 | 高（安全） | PendingState 攜帶 workspace_path + conversation_id；核准後沿用原工作區、結果入庫並顯示 |
+| 3 | `vertical_centered + set_max_width + 內層 with_layout` 巢狀使子元件繪製正常但**互動矩形被裁掉**——設定頁 toggle/導航/空狀態送出鈕點擊全部失效 | 高 | 改用樸素 horizontal+vertical 置中與 egui::Sides；toggle/導航改 Button 基底 |
+
+**修復後人工實測全過：** 滑鼠點擊送出 → 待確認面板攔截（檔案確認不存在）→ 點擊 Approve → 檔案寫入正確工作區（根目錄無逃逸）→ 🛠 執行結果顯示於聊天流；設定頁 toggle 切換即時生效並持久化到 config.local.toml（off→on round-trip 驗證）。
+
 ## 第二輪：穩定化掃蕩（同日）
 
 代碼審視找出 5 個真實缺陷，全部修復並以證據驗證：

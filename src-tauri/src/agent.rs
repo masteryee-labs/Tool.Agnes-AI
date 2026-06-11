@@ -76,6 +76,10 @@ pub struct AgentStep {
 pub struct PendingState {
     pub pending_tools: Vec<ToolCall>,
     pub pending_response: String,
+    /// 送出當下的工作區——核准執行時必須沿用，否則路徑圈禁失效（檔案逃逸到 CWD）
+    pub workspace_path: String,
+    /// 所屬對話——核准後的執行結果要寫回正確的對話
+    pub conversation_id: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -359,8 +363,12 @@ impl AgentLoop {
             let any_rejected = AgentEngine::any_rejected(&audits);
 
             if !any_rejected {
-                let requires_approval = self.config.security.require_approval
-                    && !self.config.security.auto_review
+                // 核准語意：自動審查關閉 → 必須人工核准；全域模式 → 一律逐項核准
+                // （confirmation_gate.toon：全域模式所有風險級 auto_approve=false）。
+                // 舊欄位 require_approval 不再參與判斷——它曾被舊設定頁誤存為 false，
+                // 會讓核准流程永遠不可達。
+                let requires_approval = (!self.config.security.auto_review
+                    || self.config.general.project_mode == "global")
                     && !tool_calls.is_empty();
 
                 let mut execution_results = Vec::new();
