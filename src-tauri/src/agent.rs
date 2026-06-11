@@ -42,6 +42,7 @@ Rules for Tool Use and Output formatting:
 - Explain your reasoning and plan briefly first, then output the necessary XML tags to execute the action.
 - You can output multiple tool calls in a single turn. They will be executed sequentially.
 - Path Traversal: Do NOT use parent directory components (e.g., '..') in file paths. All paths must be within the active workspace.
+- Paths are relative to the workspace root itself. Do NOT prefix paths with the workspace folder name (write src/foo.rs, NOT project/src/foo.rs).
 - Avoid AI slang, slop, or decorative padding phrases (such as "delve", "testament", "underscore", "crucial", "furthermore", "pivotal"). Be precise, engineering-focused, and direct.
 - Code Completeness: Never write placeholder code, TODOs, or leave sections commented out. Write 100% complete, compilable code.
 "#;
@@ -114,6 +115,108 @@ impl AgentEngine {
         }
         s
     }
+}
+
+/// 跨檔引用的編譯錯誤碼——單檔無法獨立驗證，遇此跳過交由 crate 層級檢查。
+const CRATE_LEVEL_CODES: [&str; 3] = ["E0432", "E0433", "E0583"];
+
+fn stderr_has_real_error(stderr: &str) -> bool {
+    stderr.lines().any(|l| {
+        (l.contains("error[") || l.trim_start().starts_with("error:"))
+            && !l.contains("aborting due to")
+    })
+}
+
+/// 寫檔後沙盒硬性對齊：以 rustc 對單一 .rs 檔做編譯檢查（--emit=metadata，不產生工件）。
+/// 防堵「寫入了編譯不過的代碼卻回報 SUCCESS」的虛假回報缺口——cargo check 只涵蓋
+/// build graph 內的檔案，孤兒檔案需要單檔檢查。
+/// 限制：單檔檢查無法解析跨檔引用；偵測到 E0432/E0433/E0583 時整檔跳過。rustc 不存在時跳過。
+pub fn check_rs_compiles(path: &std::path::Path, max_lines: usize) -> Option<String> {
+    let meta_out = std::env::temp_dir().join("agnes_align.rmeta");
+    let output = std::process::Command::new("rustc")
+        .args(["--edition", "2021", "--crate-type", "lib", "--emit", "metadata", "-o"])
+        .arg(&meta_out)
+        .arg(path)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return None, // rustc 不可用：跳過對齊（不阻斷非 Rust 環境）
+    };
+    if output.status.code() == Some(0) {
+        return None;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if CRATE_LEVEL_CODES.iter().any(|code| stderr.contains(code)) {
+        return None;
+    }
+    if !stderr_has_real_error(&stderr) {
+        return None;
+    }
+    Some(stderr.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
+}
+
+/// 沙盒硬性對齊第二階段：若 .rs 含 #[cfg(test)]，用 `rustc --test` 編譯成測試執行檔
+/// 並實際執行，取真實 Exit Code。防堵「測試斷言邏輯錯誤卻回報 SUCCESS」——
+/// metadata 編譯不會評估 cfg(test) 代碼，故編譯檢查抓不到測試失敗，必須真的跑。
+/// 自包含檔案才驗證；跨檔引用（CRATE_LEVEL_CODES）或無測試時跳過。rustc 不存在時跳過。
+pub fn run_rs_tests(path: &std::path::Path, max_lines: usize) -> Option<String> {
+    // 無測試模組則無需執行
+    let Ok(src) = std::fs::read_to_string(path) else { return None };
+    if !src.contains("#[test]") && !src.contains("#[cfg(test)]") {
+        return None;
+    }
+    // 唯一 binary 名：pid + 奈秒時戳，避免同行程內並行對齊互相覆蓋
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let bin_name = format!("agnes_align_test_{}_{}", std::process::id(), unique);
+    let mut test_bin = std::env::temp_dir().join(bin_name);
+    if cfg!(target_os = "windows") {
+        test_bin.set_extension("exe");
+    }
+    // 編譯測試執行檔
+    let compile = std::process::Command::new("rustc")
+        .args(["--test", "--edition", "2021", "-o"])
+        .arg(&test_bin)
+        .arg(path)
+        .output();
+    let compile = match compile {
+        Ok(o) => o,
+        Err(_) => return None,
+    };
+    if compile.status.code() != Some(0) {
+        let stderr = String::from_utf8_lossy(&compile.stderr);
+        if CRATE_LEVEL_CODES.iter().any(|code| stderr.contains(code)) {
+            return None; // 跨檔依賴，無法獨立跑測試
+        }
+        // 編譯期錯誤已由 check_rs_compiles 處理，這裡不重複報
+        return None;
+    }
+    // 執行測試（locale 校準確保中文輸出不亂碼），取真實 Exit Code
+    let mut run_cmd = std::process::Command::new(&test_bin);
+    crate::locale::set_locale_env(&mut run_cmd, None, None);
+    let run = match run_cmd.output() {
+        Ok(o) => o,
+        Err(_) => {
+            let _ = std::fs::remove_file(&test_bin);
+            return None;
+        }
+    };
+    let _ = std::fs::remove_file(&test_bin);
+    if run.status.code() == Some(0) {
+        return None; // 測試全綠
+    }
+    // 失敗：擷取 stdout（測試斷言細節）+ stderr（panic）
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    let mut summary: Vec<String> = stdout.lines()
+        .filter(|l| l.contains("FAILED") || l.contains("panicked") || l.contains("left:") || l.contains("right:") || l.contains("test result"))
+        .map(str::to_string)
+        .collect();
+    summary.extend(stderr.lines().filter(|l| l.contains("panicked")).map(str::to_string));
+    summary.truncate(max_lines);
+    Some(summary.join("\n"))
 }
 
 /// 引號感知的指令切割：支援 "雙引號" 與 '單引號' 包住含空白的引數
@@ -377,6 +480,29 @@ impl AgentLoop {
                         let result = self.execute_tool(tool, mcp_manager).await;
                         execution_results.push(result);
                     }
+
+                    // 寫檔後沙盒硬性對齊：.rs 必須通過編譯檢查，失敗砸回真實 rustc 錯誤自愈
+                    if let Some(align_err) = self.post_write_alignment(&tool_calls) {
+                        repair_attempts += 1;
+                        if repair_attempts <= max_repairs {
+                            messages.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": response_text.clone(),
+                            }));
+                            messages.push(serde_json::json!({
+                                "role": "user",
+                                "content": format!(
+                                    "[沙盒硬性對齊 REJECT] 你寫入的 Rust 代碼未通過編譯檢查。真實 rustc 錯誤：\n{}\n請用 write_file 重新寫入修復後的完整檔案。",
+                                    align_err,
+                                ),
+                            }));
+                            continue;
+                        }
+                        execution_results.push(format!(
+                            "[SANDBOX REJECT] 編譯對齊失敗且自愈次數用盡：\n{}",
+                            align_err,
+                        ));
+                    }
                 }
 
                 // 終端蒸餾歸檔：對話 token 增量觸及閾值時，喚醒第一組蒸餾管線。
@@ -474,6 +600,30 @@ impl AgentLoop {
                 ),
             }));
         }
+    }
+
+    /// 寫檔後對所有 .rs 檔執行編譯對齊，回傳第一個真實錯誤。
+    fn post_write_alignment(&self, tool_calls: &[ToolCall]) -> Option<String> {
+        for tool in tool_calls {
+            if tool.name != "write_file" {
+                continue;
+            }
+            let Some(ref rel) = tool.path else { continue };
+            if !rel.ends_with(".rs") {
+                continue;
+            }
+            let Ok(full) = self.canonicalize_workspace_path(rel) else { continue };
+            let lines = self.config.sandbox.stderr_feedback_lines;
+            // 階段一：編譯檢查（抓編譯錯誤，如缺生命週期標註）
+            if let Some(err) = check_rs_compiles(&full, lines) {
+                return Some(format!("{}（編譯失敗）:\n{}", rel, err));
+            }
+            // 階段二：真實執行測試（抓測試斷言邏輯錯誤）
+            if let Some(err) = run_rs_tests(&full, lines) {
+                return Some(format!("{}（測試失敗）:\n{}", rel, err));
+            }
+        }
+        None
     }
 
     /// Canonicalize a path relative to the workspace, blocking path traversal.

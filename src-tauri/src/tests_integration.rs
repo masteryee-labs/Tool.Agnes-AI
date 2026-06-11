@@ -937,3 +937,63 @@ fn test_split_command_line_plain_and_single_quotes() {
     assert_eq!(crate::split_command_line("grep 'two words' file.txt"), vec!["grep", "two words", "file.txt"]);
     assert!(crate::split_command_line("   ").is_empty());
 }
+
+// ─── 寫檔後沙盒硬性對齊（rustc 單檔編譯檢查）──────────────────────────────────
+
+#[test]
+fn test_check_rs_compiles_catches_lifetime_error() {
+    let dir = std::env::temp_dir().join("agnes_align_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let bad = dir.join("bad_lifetime.rs");
+    std::fs::write(&bad, "pub fn f(a: &str, b: &str) -> Vec<&str> { vec![a, b] }\n").unwrap();
+    let res = crate::check_rs_compiles(&bad, 20);
+    assert!(res.is_some(), "E0106 生命週期錯誤必須被攔截");
+    assert!(res.unwrap().contains("E0106"));
+}
+
+#[test]
+fn test_check_rs_compiles_passes_clean_and_skips_crate_refs() {
+    let dir = std::env::temp_dir().join("agnes_align_test");
+    let _ = std::fs::create_dir_all(&dir);
+    let good = dir.join("good.rs");
+    std::fs::write(&good, "pub fn add(a: i64, b: i64) -> i64 { a + b }\n").unwrap();
+    assert!(crate::check_rs_compiles(&good, 20).is_none(), "正確代碼必須通過");
+
+    let xref = dir.join("xref.rs");
+    std::fs::write(&xref, "use crate::db::Task;\npub fn t(_x: Task) {}\n").unwrap();
+    assert!(
+        crate::check_rs_compiles(&xref, 20).is_none(),
+        "跨檔引用屬 crate 層級依賴，單檔檢查必須跳過不誤報"
+    );
+}
+
+// ─── 沙盒對齊第二階段：真實執行測試取 Exit Code ──────────────────────────────
+
+#[test]
+fn test_run_rs_tests_catches_failing_assertion() {
+    let dir = std::env::temp_dir().join("agnes_runtest");
+    let _ = std::fs::create_dir_all(&dir);
+    let bad = dir.join("bad_assert.rs");
+    // 實作與測試期望不一致：double 寫成 +1，測試期望 *2
+    std::fs::write(&bad,
+        "pub fn double(x: i64) -> i64 { x + 1 }\n#[cfg(test)]\nmod t { use super::*; #[test] fn d() { assert_eq!(double(2), 4); } }\n",
+    ).unwrap();
+    let res = crate::run_rs_tests(&bad, 20);
+    assert!(res.is_some(), "測試斷言失敗必須被執行階段攔截");
+    assert!(res.unwrap().contains("FAILED"), "回饋必須含測試失敗證據");
+}
+
+#[test]
+fn test_run_rs_tests_passes_correct_and_skips_no_test() {
+    let dir = std::env::temp_dir().join("agnes_runtest");
+    let _ = std::fs::create_dir_all(&dir);
+    let good = dir.join("good_assert.rs");
+    std::fs::write(&good,
+        "pub fn double(x: i64) -> i64 { x * 2 }\n#[cfg(test)]\nmod t { use super::*; #[test] fn d() { assert_eq!(double(2), 4); } }\n",
+    ).unwrap();
+    assert!(crate::run_rs_tests(&good, 20).is_none(), "測試全綠必須通過");
+
+    let notest = dir.join("notest.rs");
+    std::fs::write(&notest, "pub fn f() -> i64 { 1 }\n").unwrap();
+    assert!(crate::run_rs_tests(&notest, 20).is_none(), "無測試模組必須跳過");
+}
