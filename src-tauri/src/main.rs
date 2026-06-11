@@ -187,6 +187,10 @@ impl Default for UiState {
 
 /// 截圖前的暖機幀數（等字型載入與版面穩定）
 const QA_WARMUP_FRAMES: u32 = 12;
+/// 互動 QA：任務完成後再等待的安定幀數（讓訊息流完成渲染）
+const QA_SETTLE_FRAMES: u32 = 8;
+/// 互動 QA：等待 agent 完成的逾時秒數
+const QA_SEND_TIMEOUT_SECS: u64 = 180;
 
 fn save_color_image_png(img: &egui::ColorImage, path: &std::path::Path) -> Result<(), String> {
     let [w, h] = img.size;
@@ -266,6 +270,11 @@ struct AgnesApp {
     ui_state:  Arc<Mutex<UiState>>,
     qa_shot:   Option<std::path::PathBuf>,
     qa_frames: u32,
+    /// 互動 QA：啟動後自動經 handle_send 送出的 prompt（與使用者操作完全相同的代碼路徑）
+    qa_send:   Option<String>,
+    qa_sent:   bool,
+    qa_done_frames: u32,
+    qa_deadline: Option<std::time::Instant>,
 }
 
 /// 載入作業系統 CJK 字型（egui default_fonts 不含中文字形，缺此步全部渲染為方框亂碼）。
@@ -388,16 +397,60 @@ impl AgnesApp {
             }
         }
 
-        Self { app_state, ui_state, qa_shot, qa_frames: 0 }
+        // 互動 QA 模式：AGNES_QA_SEND=<prompt> 啟動後自動經 handle_send 送出，
+        // 走與使用者完全相同的代碼路徑（輸入框 → handle_send → API → 工具 → UI 更新）。
+        // 此模式強制 auto_review=true（僅記憶體內，不寫回 config.local.toml），
+        // 讓工具實際執行以驗證端對端流程。
+        let qa_send = std::env::var("AGNES_QA_SEND").ok().filter(|s| !s.trim().is_empty());
+        if qa_send.is_some() {
+            app_state.config.lock().unwrap().security.auto_review = true;
+        }
+
+        Self {
+            app_state, ui_state, qa_shot, qa_frames: 0,
+            qa_send, qa_sent: false, qa_done_frames: 0, qa_deadline: None,
+        }
     }
 
-    /// QA 截圖鉤子：每幀呼叫。暖機後送出截圖指令，收到影像即存檔退出。
+    /// QA 截圖鉤子：每幀呼叫。
+    /// 純截圖模式：暖機後立即截圖。
+    /// 互動模式（qa_send）：暖機後送出 prompt → 等 agent 完成 → 安定幀 → 截圖。
     fn qa_screenshot_hook(&mut self, ctx: &egui::Context) {
         let Some(path) = self.qa_shot.clone() else { return };
         self.qa_frames += 1;
-        if self.qa_frames == QA_WARMUP_FRAMES {
+
+        if let Some(prompt) = self.qa_send.clone() {
+            if !self.qa_sent && self.qa_frames >= QA_WARMUP_FRAMES {
+                self.ui_state.lock().unwrap().chat_input = prompt;
+                self.handle_send(ctx);
+                self.qa_sent = true;
+                self.qa_deadline = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(QA_SEND_TIMEOUT_SECS),
+                );
+                println!("[QA] prompt sent via handle_send, waiting for agent…");
+            }
+            if self.qa_sent {
+                let complete = self.app_state.agent_state.try_lock()
+                    .map(|s| matches!(*s, AgentExecutionState::Complete))
+                    .unwrap_or(false);
+                let timed_out = self.qa_deadline
+                    .map(|d| std::time::Instant::now() > d)
+                    .unwrap_or(false);
+                if complete || timed_out {
+                    self.qa_done_frames += 1;
+                    if self.qa_done_frames == QA_SETTLE_FRAMES {
+                        if timed_out && !complete {
+                            eprintln!("[QA] TIMEOUT waiting for agent — capturing current state");
+                        }
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                    }
+                }
+            }
+        } else if self.qa_frames == QA_WARMUP_FRAMES {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
+
         let shot = ctx.input(|i| {
             i.events.iter().find_map(|e| {
                 if let egui::Event::Screenshot { image, .. } = e {
