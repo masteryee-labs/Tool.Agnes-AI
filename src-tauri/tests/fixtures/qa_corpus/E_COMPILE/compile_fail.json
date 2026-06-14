@@ -1,0 +1,11 @@
+{
+  "expected_verdict": "REJECTED",
+  "failure_code": "G13",
+  "tool_calls": [
+    {
+      "name": "write_file",
+      "path": "src/dummy.rs",
+      "content": "fn dummy() { unimplemented!() }"
+    }
+  ]
+}

@@ -1,6 +1,8 @@
 use serde::{Serialize, Deserialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 use crate::sandbox;
 use crate::config::Config;
 use crate::mcp::McpManager;
@@ -275,11 +277,15 @@ pub struct AgentLoop {
     pub workspace_path: PathBuf,
     /// 檔案變更追蹤的歸屬對話——None 時 write_file 跳過 diff 記錄（不 panic）。
     pub current_conversation_id: Option<String>,
+    /// 令牌桶速率限制器，共享於同一 AgentLoop 的所有 API 呼叫。
+    rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
 }
 
 impl AgentLoop {
     pub fn new(config: Config, workspace_path: String) -> Self {
+        let max_rpm = config.api.max_rpm;
         Self {
+            rate_limiter: Arc::new(crate::rate_limiter::RateLimiter::new(max_rpm)),
             config,
             workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
             current_conversation_id: None,
@@ -296,28 +302,71 @@ impl AgentLoop {
     pub fn run_audits(&self, tool_calls: &[ToolCall], messages: &[serde_json::Value]) -> Vec<AuditResult> {
         AgentEngine.run_validation(&self.config, tool_calls, messages)
     }
+}
 
+pub fn clean_nul_chars(s: &str) -> String {
+    s.replace('\0', "")
+}
+
+pub fn clean_json_value(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::String(s) => {
+            if s.contains('\0') {
+                *s = s.replace('\0', "");
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                clean_json_value(v);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for (_, v) in obj.iter_mut() {
+                clean_json_value(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn map_gate_to_failure_code(reason: &str) -> &'static str {
+    if reason.contains("G6") || reason.contains("G14") || reason.contains("D2") {
+        "E_PROGRAM"
+    } else if reason.contains("G5") || reason.contains("G7") || reason.contains("G10") || reason.contains("G19") || reason.contains("G20") || reason.contains("G21") || reason.contains("D3") {
+        "E_ARGS"
+    } else if reason.contains("G4") || reason.contains("G18") || reason.contains("D4") {
+        "E_PATH"
+    } else if reason.contains("G11") || reason.contains("D5") {
+        "E_SHELL"
+    } else if reason.contains("G12") || reason.contains("D6") {
+        "E_SECRET"
+    } else if reason.contains("D7") {
+        "E_DESTRUCT"
+    } else if reason.contains("G8") || reason.contains("G9") || reason.contains("G13") || reason.contains("G16") || reason.contains("D8") || reason.contains("Rust 代碼未通過編譯檢查") || reason.contains("編譯對齊失敗") {
+        "E_COMPILE"
+    } else {
+        "E_SCHEMA"
+    }
+}
+
+impl AgentLoop {
     fn get_repair_prompt(&self, audits: &[AuditResult]) -> String {
         let mut instructions = Vec::new();
         for a in audits {
             if a.verdict == "REJECTED" {
-                if a.reason.contains("G3") {
-                    instructions.push("Avoid decorative AI words. Use concrete technical terminology.");
-                } else if a.reason.contains("G4") {
-                    instructions.push("Markdown files must go to Docs/ and TOON files to .agent/rules/.");
-                } else if a.reason.contains("G6") {
-                    instructions.push("Do not include Chromium or WebView dependencies (webkit, chromium, playwright) in Cargo.toml.");
-                } else if a.reason.contains("G11") {
-                    instructions.push("Pass arguments as a vector/array, do not use shell string concatenation with ; | & $ `.");
-                } else if a.reason.contains("G12") {
-                    instructions.push("Do not hardcode API keys (sk-...). Use {{API_KEY}} or environment variables.");
-                } else if a.reason.contains("G13") {
-                    instructions.push("Do not leave TODO or unimplemented! placeholders in the code.");
-                } else if a.reason.contains("G14") {
-                    instructions.push("Do not use blocking HTTP client calls; use async reqwest.");
-                } else {
-                    instructions.push("Correct the tool call structure or arguments according to the validation error.");
-                }
+                let code = map_gate_to_failure_code(&a.reason);
+                let instr = match code {
+                    "E_SCHEMA" => "Correct the tool call structure or arguments according to the validation error. Provide correct XML/JSON schema formatting. Only output the tool call tags, no conversational prefix or suffix.",
+                    "E_PROGRAM" => "Use only allowed programs and libraries. Avoid forbidden programs or dependencies.",
+                    "E_ARGS" => "Pass arguments as a vector/array, do not use shell string concatenation. Separate parameters clearly.",
+                    "E_SHELL" => "Pass arguments as a vector/array, do not use shell string concatenation. Avoid shell injection characters (; | & $ `).",
+                    "E_PATH" => "Path is outside the workspace or contains path traversal (..). All paths must be relative, located within the workspace, and must not contain parent directory components.",
+                    "E_SECRET" => "Do not hardcode API keys or credentials. Use {{API_KEY}} placeholders or load them from environment variables.",
+                    "E_DESTRUCT" => "Destructive command detected. Convert it to a PendingAction request for user review instead of executing directly.",
+                    "E_COMPILE" => "Compilation check failed. Please resolve the compiler/clippy error and rewrite the complete file.",
+                    _ => "Correct the tool call structure or arguments according to the validation error."
+                };
+                instructions.push(format!("[REJECT: {}] {}", code, instr));
             }
         }
         if instructions.is_empty() {
@@ -344,7 +393,6 @@ impl AgentLoop {
         }
 
         let api_url = self.config.api.base_url.clone();
-        let model = self.config.api.model.clone();
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.config.api.timeout_seconds))
@@ -376,12 +424,9 @@ impl AgentLoop {
             }
 
             if !bypassed {
-                if let Ok(tags) = memory_manager.stage1_find_tags(&client, &api_url, api_key, &model, last_user_prompt).await {
-                    if !tags.is_empty() {
-                        if let Ok(files) = memory_manager.stage2_find_files(&client, &api_url, api_key, &model, last_user_prompt, &tags).await {
-                            rag_context = memory_manager.stage3_inject_contents(&files);
-                        }
-                    }
+                // Stage 1+2 合併為一次 API 呼召（2 RPM → 1 RPM）；令牌由 stage12_merged 內部統一獲取
+                if let Ok(files) = memory_manager.stage12_merged(&client, &self.rate_limiter, &api_url, api_key, &self.config.model_routing.low, last_user_prompt, &self.config.memory).await {
+                    rag_context = memory_manager.stage3_inject_contents(&files);
                 }
             }
         }
@@ -397,8 +442,28 @@ impl AgentLoop {
             crate::skills::build_mcp_tools_prompt(&all_tools)
         };
 
+        // Load repair cache files
+        let qa_pipeline_dir = self.workspace_path.join("memory_tags").join("qa_pipeline");
+        let mut pre_injected_instructions = String::new();
+        if qa_pipeline_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&qa_pipeline_dir) {
+                for entry in entries.flatten() {
+                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                        && entry.path().extension().map(|ext| ext == "md").unwrap_or(false)
+                    {
+                        if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                            pre_injected_instructions.push_str(&content);
+                            pre_injected_instructions.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+
         let mut repair_attempts = 0;
         let max_repairs = self.config.api.max_repairs;
+        let mut failed_error_codes = std::collections::HashSet::new();
+        let mut error_code_counts = std::collections::HashMap::new();
 
         loop {
             if token_budgeter.lock().await.is_locked() {
@@ -406,10 +471,20 @@ impl AgentLoop {
             }
 
             let mut request_messages = messages.clone();
+            for msg in &mut request_messages {
+                clean_json_value(msg);
+            }
+            
             // Inject general system instructions prompt at the start
+            let mut final_system_prompt = AGNES_SYSTEM_PROMPT.to_string();
+            if !pre_injected_instructions.is_empty() {
+                final_system_prompt.push_str("\n\n=== QA PIPELINE PRE-INJECTED INSTRUCTIONS ===\n");
+                final_system_prompt.push_str(&pre_injected_instructions);
+                final_system_prompt.push_str("=============================================\n");
+            }
             request_messages.insert(0, serde_json::json!({
                 "role": "system",
-                "content": AGNES_SYSTEM_PROMPT
+                "content": final_system_prompt
             }));
             
             // Claude 互通層與 RAG 依序排在主系統提示之後
@@ -437,56 +512,51 @@ impl AgentLoop {
                 }));
             }
 
+            let mut current_model = self.config.model_routing.main.clone();
+            for count in error_code_counts.values() {
+                if *count >= max_repairs as usize {
+                    current_model = self.config.model_routing.high.clone();
+                    break;
+                }
+            }
+
             let payload = serde_json::json!({
-                "model": model,
+                "model": current_model,
                 "messages": request_messages,
                 "temperature": 0.2,
             });
 
-            let response = client
-                .post(&api_url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .json(&payload)
-                .send()
-                .await;
+            let res_json = self.send_api_request(&client, &api_url, api_key, &payload).await?;
 
-            let response_text = match response {
-                Ok(res) => {
-                    if res.status().is_success() {
-                        let res_json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-                        
-                        let usage = &res_json["usage"];
-                        let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
-                        let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
-                        let total_tokens = usage["total_tokens"].as_u64().unwrap_or(0);
+            let usage = &res_json["usage"];
+            let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+            let total_tokens = usage["total_tokens"].as_u64().unwrap_or(0);
 
-                        {
-                            let mut budget = token_budgeter.lock().await;
-                            budget.record_usage(prompt_tokens, completion_tokens);
-                        }
-
-                        if let Ok(conn) = rusqlite::Connection::open(db_path) {
-                            let _ = crate::add_token_log(
-                                &conn,
-                                None,
-                                &model,
-                                prompt_tokens as i64,
-                                completion_tokens as i64,
-                                total_tokens as i64,
-                                (total_tokens as f64) * self.config.api.cost_per_token,
-                            );
-                        }
-
-                        res_json["choices"][0]["message"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string()
-                    } else {
-                        return Err(format!("API 伺服器回傳錯誤代碼: {}", res.status()));
-                    }
-                }
-                Err(e) => return Err(format!("無法連接 API 伺服器: {}", e)),
+            let warning_triggered = {
+                let mut budget = token_budgeter.lock().await;
+                budget.record_usage(prompt_tokens, completion_tokens);
+                if budget.budget_ratio() >= 0.8 { 1 } else { 0 }
             };
+
+            if let Ok(conn) = rusqlite::Connection::open(db_path) {
+                let _ = crate::add_token_log(
+                    &conn,
+                    None,
+                    &current_model,
+                    prompt_tokens as i64,
+                    completion_tokens as i64,
+                    total_tokens as i64,
+                    (total_tokens as f64) * self.config.api.cost_per_token,
+                    warning_triggered,
+                );
+            }
+
+            let response_raw = res_json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let response_text = clean_nul_chars(&response_raw);
 
             let tool_calls = self.parse_tool_calls(&response_text);
             
@@ -513,6 +583,7 @@ impl AgentLoop {
                     && !tool_calls.is_empty();
 
                 let mut execution_results = Vec::new();
+                let mut post_write_ok = true;
                 if !requires_approval {
                     for tool in &tool_calls {
                         let result = self.execute_tool(tool, mcp_manager).await;
@@ -521,8 +592,14 @@ impl AgentLoop {
 
                     // 寫檔後沙盒硬性對齊：.rs 必須通過編譯檢查，失敗砸回真實 rustc 錯誤自愈
                     if let Some(align_err) = self.post_write_alignment(&tool_calls) {
+                        post_write_ok = false;
                         repair_attempts += 1;
-                        if repair_attempts <= max_repairs {
+                        let code = "E_COMPILE";
+                        failed_error_codes.insert(code);
+                        let count = error_code_counts.entry(code).or_insert(0);
+                        *count += 1;
+
+                        if repair_attempts <= max_repairs as usize {
                             messages.push(serde_json::json!({
                                 "role": "assistant",
                                 "content": response_text.clone(),
@@ -530,7 +607,7 @@ impl AgentLoop {
                             messages.push(serde_json::json!({
                                 "role": "user",
                                 "content": format!(
-                                    "[沙盒硬性對齊 REJECT] 你寫入的 Rust 代碼未通過編譯檢查。真實 rustc 錯誤：\n{}\n請用 write_file 重新寫入修復後的完整檔案。",
+                                    "[沙盒硬性對齊 REJECT] [REJECT: E_COMPILE] 你寫入的 Rust 代碼未通過編譯檢查。真實 rustc 錯誤：\n{}\n請用 write_file 重新寫入修復後的完整檔案。",
                                     align_err,
                                 ),
                             }));
@@ -543,8 +620,35 @@ impl AgentLoop {
                     }
                 }
 
-                // 終端蒸餾歸檔：對話 token 增量觸及閾值時，喚醒第一組蒸餾管線。
-                // 水位記號：只在「相對上次蒸餾再增長一個閾值」時觸發，防止每輪重複蒸餾。
+                if post_write_ok {
+                    // Successful repair caching!
+                    if repair_attempts > 0 {
+                        let qa_pipeline_dir = self.workspace_path.join("memory_tags").join("qa_pipeline");
+                        let _ = std::fs::create_dir_all(&qa_pipeline_dir);
+                        for code in &failed_error_codes {
+                            let instr = match *code {
+                                "E_SCHEMA" => "Correct the tool call structure or arguments according to the validation error. Provide correct XML/JSON schema formatting. Only output the tool call tags, no conversational prefix or suffix.",
+                                "E_PROGRAM" => "Use only allowed programs and libraries. Avoid forbidden programs or dependencies.",
+                                "E_ARGS" => "Pass arguments as a vector/array, do not use shell string concatenation. Separate parameters clearly.",
+                                "E_SHELL" => "Pass arguments as a vector/array, do not use shell string concatenation. Avoid shell injection characters (; | & $ `).",
+                                "E_PATH" => "Path is outside the workspace or contains path traversal (..). All paths must be relative, located within the workspace, and must not contain parent directory components.",
+                                "E_SECRET" => "Do not hardcode API keys or credentials. Use {{API_KEY}} placeholders or load them from environment variables.",
+                                "E_DESTRUCT" => "Destructive command detected. Convert it to a PendingAction request for user review instead of executing directly.",
+                                "E_COMPILE" => "Compilation check failed. Please resolve the compiler/clippy error and rewrite the complete file.",
+                                _ => "Correct the tool call instructions according to validation errors."
+                            };
+                            let md_content = format!(
+                                "# QA Pipeline Corrective Instruction for {}\n\nAlways follow this rule to avoid validation failure:\n{}\n",
+                                code, instr
+                            );
+                            let file_path = qa_pipeline_dir.join(format!("{}.md", code));
+                            let _ = std::fs::write(&file_path, md_content);
+                        }
+                    }
+                }
+
+                // 終端蒸餾歸檔：對話 token 增量觸及水位時，喚醒第一組蒸餾管線。
+                // 水位記號：只在「相對上次蒸餾再增長一個水位」時觸發，防止每輪重複蒸餾。
                 let conversation_text: String = messages.iter()
                     .filter_map(|m| m["content"].as_str())
                     .chain(std::iter::once(response_text.as_str()))
@@ -568,9 +672,10 @@ impl AgentLoop {
                 if conv_tokens - last_distill_tokens
                     >= self.config.memory.distill_trigger_delta as i64
                 {
-                    // 蒸餾 await 階段不持有 SQLite 連線（Connection 非 Sync）
+                    // 蒸餾 await 階段不持有 SQLite 連線（Connection 非 Sync）；
+                    // 令牌桶共用同一 rate_limiter，alpha/beta/integrator 連發也受 20 RPM 約束
                     match memory_manager.distill_text(
-                        &client, &api_url, api_key, &model,
+                        &client, &self.rate_limiter, &api_url, api_key, &self.config.model_routing.low,
                         &conversation_text, &self.config.memory,
                     ).await {
                         Ok(distilled) => {
@@ -609,7 +714,18 @@ impl AgentLoop {
 
             // If audited rejected, trigger self-repair
             repair_attempts += 1;
-            if repair_attempts > max_repairs {
+            
+            // Map gates to E_* and update counts
+            for a in &audits {
+                if a.verdict == "REJECTED" {
+                    let code = map_gate_to_failure_code(&a.reason);
+                    failed_error_codes.insert(code);
+                    let count = error_code_counts.entry(code).or_insert(0);
+                    *count += 1;
+                }
+            }
+
+            if repair_attempts > max_repairs as usize {
                 // Stop retrying, return failed step
                 let mut execution_results = Vec::new();
                 execution_results.push(format!("[AUDIT REJECTED] Max repair attempts reached: {}", AgentEngine::rejection_details(&audits)));
@@ -624,6 +740,13 @@ impl AgentLoop {
             }
 
             let repair_prompt = self.get_repair_prompt(&audits);
+            
+            let first_code = audits.iter()
+                .filter(|a| a.verdict == "REJECTED")
+                .map(|a| map_gate_to_failure_code(&a.reason))
+                .next()
+                .unwrap_or("E_SCHEMA");
+
             messages.push(serde_json::json!({
                 "role": "assistant",
                 "content": response_text.clone(),
@@ -631,13 +754,69 @@ impl AgentLoop {
             messages.push(serde_json::json!({
                 "role": "user",
                 "content": format!(
-                    "[QA REPAIR ATTEMPT {}/{}] The prior response failed validation errors:\n{}\n\nCorrection instruction: {}",
-                    repair_attempts, max_repairs,
+                    "[QA REPAIR ATTEMPT {}/{}] [REJECT: {}] The prior response failed validation errors:\n{}\n\nCorrection instruction: {}",
+                    repair_attempts, max_repairs, first_code,
                     AgentEngine::rejection_details(&audits),
                     repair_prompt
                 ),
             }));
         }
+    }
+
+    /// 帶速率限制與指數退避重試的 API 請求包裝。
+    /// 420/429 速率超限時，依 config 設定等待後重試，最多 retry_max_attempts 次。
+    async fn send_api_request(
+        &self,
+        client: &reqwest::Client,
+        api_url: &str,
+        api_key: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut clean_payload = payload.clone();
+        clean_json_value(&mut clean_payload);
+        let mut backoff = self.config.api.retry_initial_backoff_secs;
+        for attempt in 0..self.config.api.retry_max_attempts {
+            self.rate_limiter.acquire().await;
+
+            let res = match client
+                .post(api_url)
+                .header("Authorization", format!("Bearer {}", api_key))
+                .json(&clean_payload)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(format!("無法連接 API 伺服器: {}", e)),
+            };
+
+            let status = res.status();
+
+            if status.as_u16() == 429 {
+                if attempt + 1 < self.config.api.retry_max_attempts {
+                    tokio::time::sleep(Duration::from_secs(backoff)).await;
+                    backoff = ((backoff as f64) * self.config.api.retry_backoff_multiplier)
+                        .min(self.config.api.retry_max_backoff_secs as f64) as u64;
+                    continue;
+                }
+                return Err(format!(
+                    "API 速率限制（429）：已重試 {} 次仍無法送出，請稍後再試",
+                    attempt + 1
+                ));
+            }
+
+            if status.is_success() {
+                return res
+                    .json()
+                    .await
+                    .map_err(|e| format!("API 回應解析失敗: {}", e));
+            }
+
+            return Err(format!("API 伺服器回傳錯誤代碼: {}", status));
+        }
+        Err(format!(
+            "API 呼叫超過最大重試次數（{}）",
+            self.config.api.retry_max_attempts
+        ))
     }
 
     /// 寫檔後對所有 .rs 檔執行編譯對齊，回傳第一個真實錯誤。
@@ -667,7 +846,8 @@ impl AgentLoop {
     /// Canonicalize a path relative to the workspace, blocking path traversal.
     /// In "global" mode (project_mode == "global"), full system access is allowed.
     fn canonicalize_workspace_path(&self, relative: &str) -> Result<PathBuf, String> {
-        let raw = PathBuf::from(relative);
+        let cleaned = clean_nul_chars(relative);
+        let raw = PathBuf::from(cleaned);
 
         // If the path already contains traversal components, block it
         if raw.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
@@ -860,12 +1040,13 @@ impl AgentLoop {
                                     fs::read_to_string(&full_path).unwrap_or_default();
                                 // Strip sensitive key content from stored content
                                 let safe_content = self.strip_secrets(&tool.content);
-                                match fs::write(&full_path, &safe_content) {
+                                let clean_safe_content = clean_nul_chars(&safe_content);
+                                match fs::write(&full_path, &clean_safe_content) {
                                     Ok(_) => {
                                         self.record_file_change(
                                             relative_path,
                                             &before_content,
-                                            &safe_content,
+                                            &clean_safe_content,
                                         );
                                         format!("[SUCCESS] 成功寫入檔案: {}", relative_path)
                                     }
@@ -892,20 +1073,22 @@ impl AgentLoop {
                     }
                 }
                 "run_command" => {
-                    let cmd_parts: Vec<String> = split_command_line(&tool.content);
+                    let cleaned_content = clean_nul_chars(&tool.content);
+                    let cmd_parts: Vec<String> = split_command_line(&cleaned_content);
                     if cmd_parts.is_empty() {
                         return "[ERROR] 指令為空".to_string();
                     }
-                    let program = cmd_parts[0].as_str();
-                    let args: Vec<&str> = cmd_parts[1..].iter().map(|s| s.as_str()).collect();
+                    let program = cmd_parts[0].replace('\0', "");
+                    let args: Vec<String> = cmd_parts[1..].iter().map(|s| s.replace('\0', "")).collect();
+                    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                     let workspace = if self.config.general.project_mode == "project" {
                         Some(&self.workspace_path)
                     } else {
                         None
                     };
                     let result = sandbox::run_in_sandbox(
-                        program,
-                        &args,
+                        &program,
+                        &args_ref,
                         &self.config.general.shell,
                         self.config.security.full_access,
                         workspace,
@@ -932,7 +1115,14 @@ impl AgentLoop {
             return;
         };
         let db_path = crate::resolve_db_path();
-        if let Err(e) = crate::add_file_change(&db_path, conv_id, relative_path, before, after) {
+        if let Err(e) = crate::add_file_change(
+            &db_path,
+            conv_id,
+            relative_path,
+            before,
+            after,
+            &self.config.file_changes,
+        ) {
             eprintln!("[Agnes] 檔案變更記錄失敗（不影響寫檔結果）: {}", e);
         }
     }

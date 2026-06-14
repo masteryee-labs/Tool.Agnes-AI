@@ -29,22 +29,25 @@
 - `locale.rs` — Windows `chcp 65001` / Unix `LANG=zh_TW.UTF-8` 語系校準
 - `mcp.rs` — MCP 伺服器管理（含 env 注入；GUI 啟動時自動拉起啟用的伺服器）
 - `skills.rs` — Claude 互通層：`.claude/skills/*/SKILL.md` 技能、`CLAUDE.md` 規則、`.mcp.json` MCP 設定的確定性解析與系統提示注入
-- `ui/` — egui 前端原型（17 代理人側欄、Projects、工作區）
-- `.agent/rules/` — core.agents.toon（17 代理人）、security_policies.toon、confirmation_gate.toon
-- `tests_integration.rs` — 636 行整合測試
+- `memory.rs` — 滑動視窗分塊 + 三階段漏斗 RAG + FTS5 索引；Stage 0 本機記憶查詢命中即跳過檢索 API，Stage 1+2 已合併為單次呼叫
+- `rate_limiter.rs` — 全域共享令牌桶限流器：把關每一個 Agnes API 呼叫，20 RPM 上限、`acquire()` 等待補充而非拒絕、429 倍率式指數退避；`max_rpm = 0` 可停用上限（測試用）
+- `ui/` — egui 前端原型（22 代理人側欄、Projects、工作區、標題列即時預算計）
+- `.agent/rules/` — core.agents.toon（22 代理人）、security_policies.toon、confirmation_gate.toon
+- `tests_integration.rs` — 整合測試；`tests/e2e_tests.rs` — 端到端測試；`tests/fixtures/qa_corpus/` — QA 回歸語料庫（`cargo test qa_replay`）
+- TokenBudgeter — Session 級 token 預算硬鎖：預算耗盡後僅允許確定性（非 API）操作繼續
 
-## 差距分析（本輪規劃要補的洞）
+## 差距分析（實作進度與剩餘缺口）
 
-| # | 缺口 | 對應文件 | 優先級 |
-|---|---|---|---|
-| 1 | 第一組「記憶蒸餾與防幻覺組」5 名代理人未定義、未實作（17/22） | 02、06 | P0 |
-| 2 | 無限上下文：滑動視窗分塊 + 三階段漏斗 RAG 尚未實作（無 `memory_tags/` 模組） | 02 | P0 |
-| 3 | 全自動 QA：API 回傳指令的驗證閘門已有確定性部分（sandbox.rs），但缺「提示詞自修正」與「回歸測試語料庫」 | 03 | P0 |
-| 4 | 寫檔前 22 道交叉驗證管線未形式化（目前僅 run_audits 局部審查） | 06 | P1 |
-| 5 | Token 經濟：尚無 token 預算器、非對稱模型路由、提示快取對齊 | 04 | P1 |
-| 6 | 多子代理人「並行」執行（目前為順序調度） | 01、08 | P1 |
-| 7 | UI 距離 Codex / Antigravity / Claude 桌面版規格仍有差距（分支選擇、Artifact 審查策略、安全預設下拉） | 07 | P2 |
-| 8 | UniFFI 行動端綁定未動工 | 08 | P3 |
+| # | 缺口 | 對應文件 | 優先級 | 狀態 |
+|---|---|---|---|---|
+| 1 | 第一組「記憶蒸餾與防幻覺組」代理人——22 代理人全數定義並路由（非 17/22） | 02、06 | P0 | 實作完成 |
+| 2 | 無限上下文：滑動視窗分塊 + 三階段漏斗 RAG + FTS5（`memory.rs`） | 02 | P0 | 實作完成 |
+| 3 | 全自動 QA：回歸測試語料庫（`tests/fixtures/qa_corpus/` + `cargo test qa_replay`）、e2e 測試（`tests/e2e_tests.rs`）、提示詞自修正 | 03 | P0 | 實作完成 |
+| 4 | 寫檔前 22 道交叉驗證管線形式化 | 06 | P1 | 實作完成 |
+| 5 | Token 經濟：TokenBudgeter 預算器、全域令牌桶限流器（`rate_limiter.rs`，20 RPM + 429 退避）、Stage 0 FTS5 旁路、Stage 1+2 合併 | 04 | P1 | 實作完成 |
+| 6 | 多子代理人並行執行：DAG 拓樸排序（prerequisites 前置依賴）已實作，惟 `dispatch_subagents` 仍為順序執行，同層 tokio JoinSet 並行待辦（Phase 2） | 01、08 | P1 | 部分 |
+| 7 | WASM 沙盒（wasmtime）與 Docker 沙盒 `--network=none`（Phase 3） | 05、08 | P2 | 待辦 |
+| 8 | UniFFI 行動端綁定與多模態媒體（Phase 4） | 08 | P3 | 待辦 |
 
 ## 鋼鐵戒律（全專案不可違反）
 

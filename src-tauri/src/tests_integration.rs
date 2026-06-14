@@ -1027,3 +1027,52 @@ fn test_run_rs_tests_passes_correct_and_skips_no_test() {
     std::fs::write(&notest, "pub fn f() -> i64 { 1 }\n").unwrap();
     assert!(crate::run_rs_tests(&notest, 20).is_none(), "無測試模組必須跳過");
 }
+
+// ─── Milestone A Workers QA / Nul Sanitization Tests ─────────────────────────
+
+#[test]
+fn test_clean_nul_chars() {
+    assert_eq!(crate::agent::clean_nul_chars("hello\0world"), "helloworld");
+    assert_eq!(crate::agent::clean_nul_chars("\0\0"), "");
+}
+
+#[test]
+fn test_clean_json_value() {
+    let mut val = serde_json::json!({
+        "a": "hello\0world",
+        "b": ["foo\0bar", 123],
+        "c": {
+            "d": "\0nested\0"
+        }
+    });
+    crate::agent::clean_json_value(&mut val);
+    assert_eq!(val["a"].as_str().unwrap(), "helloworld");
+    assert_eq!(val["b"][0].as_str().unwrap(), "foobar");
+    assert_eq!(val["c"]["d"].as_str().unwrap(), "nested");
+}
+
+#[test]
+fn test_map_gate_to_failure_code() {
+    assert_eq!(crate::agent::map_gate_to_failure_code("[REJECT: G6 | 檔案: Cargo.toml | 原因: Chromium]"), "E_PROGRAM");
+    assert_eq!(crate::agent::map_gate_to_failure_code("[REJECT: G4 | 檔案: N/A | 原因: path traversal]"), "E_PATH");
+    assert_eq!(crate::agent::map_gate_to_failure_code("[REJECT: G11 | 檔案: N/A | 原因: shell injection]"), "E_SHELL");
+    assert_eq!(crate::agent::map_gate_to_failure_code("[REJECT: G12 | 檔案: N/A | 原因: secret leakage]"), "E_SECRET");
+    assert_eq!(crate::agent::map_gate_to_failure_code("Rust 代碼未通過編譯檢查"), "E_COMPILE");
+}
+
+#[test]
+fn test_memory_config_default_max_repairs() {
+    let cfg = crate::MemoryConfig::default();
+    assert_eq!(cfg.max_repairs, 3);
+    
+    let toml_str = r#"
+        md_token_cap = 2000
+        context_high_watermark = 800000
+        chunk_size = 100000
+        overlap_lines = 50
+        distill_trigger_delta = 50000
+        local_hit_threshold = 0.65
+    "#;
+    let parsed: crate::MemoryConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(parsed.max_repairs, 3);
+}

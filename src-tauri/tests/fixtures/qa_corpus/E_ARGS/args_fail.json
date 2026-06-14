@@ -1,0 +1,11 @@
+{
+  "expected_verdict": "REJECTED",
+  "failure_code": "G7",
+  "tool_calls": [
+    {
+      "name": "run_command",
+      "path": null,
+      "content": "sleep 100"
+    }
+  ]
+}

@@ -14,7 +14,8 @@ Agnes AI is a high-defense, high-speed desktop AI agent built with **pure Rust +
 - **Claude-compatible Skills** — drop `SKILL.md` files under `.claude/skills/<name>/` in your workspace; invoke them by typing `/name` in chat. `CLAUDE.md` project rules are loaded automatically
 - **Claude-compatible MCP** — put a standard `.mcp.json` in your workspace root, or add servers in Settings → MCP Servers; connected tool lists are exposed to the model automatically
 - **Layered memory** — sliding-window chunking + 3-stage funnel RAG over an FTS5 index, with distillation watermarks to avoid re-burning tokens
-- **Token economy** — per-session token budget with a hard lock, live budget meter in the title bar
+- **Rate limiting & 20 RPM protection** — one global shared token-bucket limiter gates every Agnes API call (distillation and retrieval included); `acquire()` waits for refill rather than rejecting, so bursts never breach the 20 requests/minute free-tier cap. On a 429 the client applies multiplier-based exponential backoff. Every parameter is config-driven (`max_rpm`, retry backoff settings) — no magic numbers
+- **Token economy** — per-session token budget with a hard lock, live budget meter in the title bar. Request count is cut by design: Stage 0 does a local FTS5 memory lookup that on a hit skips the retrieval API call entirely (0 API calls), and Stage 1+2 of the funnel RAG were merged into a single call (2 calls → 1)
 - **Sandbox alignment** — written `.rs` files are compiled (and their tests executed) immediately; "claims success but doesn't compile" is rejected on the spot
 
 ## Install & Build
@@ -22,7 +23,7 @@ Agnes AI is a high-defense, high-speed desktop AI agent built with **pure Rust +
 Prerequisites: [Rust toolchain](https://rustup.rs/) (stable, 2021 edition).
 
 ```powershell
-git clone https://github.com/masteryee-labs/Agnes-AI.git
+git clone https://github.com/masteryee-labs/Tool.Agnes-AI.git
 cd Agnes-AI
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # Run the GUI
@@ -92,6 +93,7 @@ Type `/deploy …` in chat to invoke. Skills and `CLAUDE.md` rules are injected 
 - Commands are executed as argument vectors — no shell string concatenation
 - Path confinement: file operations outside the selected workspace are rejected (project mode)
 - Exit codes and stderr are captured raw; the model's verbal "success" is never trusted
+- The global rate limiter plus 429 exponential backoff protect the key and account from rate-limit lockout; no single subsystem (memory archival included) can bypass the shared 20 RPM cap
 
 ## Development docs
 

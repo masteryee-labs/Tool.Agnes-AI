@@ -2,6 +2,7 @@ mod config;
 mod db;
 pub mod diffview;
 mod locale;
+mod rate_limiter;
 mod sandbox;
 mod orchestrator;
 mod agent;
@@ -147,4 +148,111 @@ pub fn resolve_db_path() -> PathBuf {
         }
     }
     PathBuf::from("agnes_state.db")
+}
+
+#[allow(clippy::permissions_set_readonly_false)]
+pub fn cleanup_nul_residues(workspace_root: &std::path::Path) -> std::io::Result<()> {
+    let abs_root = if workspace_root.is_absolute() {
+        workspace_root.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(workspace_root)
+    };
+    let targets = vec![
+        abs_root.join("nul"),
+        abs_root.join("src-tauri").join("nul"),
+    ];
+    for target in targets {
+        let path_str = target.to_string_lossy().to_string();
+        let p = if cfg!(windows) {
+            let normalized = path_str.replace('/', "\\");
+            let unc_path = if !normalized.starts_with(r"\\?\") {
+                format!(r"\\?\{}", normalized)
+            } else {
+                normalized
+            };
+            std::path::PathBuf::from(unc_path)
+        } else {
+            target
+        };
+        if p.exists() || p.is_file() {
+            if let Ok(metadata) = std::fs::metadata(&p) {
+                let mut permissions = metadata.permissions();
+                if permissions.readonly() {
+                    permissions.set_readonly(false);
+                    let _ = std::fs::set_permissions(&p, permissions);
+                }
+            }
+            std::fs::remove_file(p)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn cleanup_tauri_leftovers(workspace_root: &std::path::Path) -> std::io::Result<()> {
+    let tauri_conf = workspace_root.join("src-tauri").join("tauri.conf.json");
+    if tauri_conf.exists() {
+        std::fs::remove_file(tauri_conf)?;
+    }
+    let run_error_root = workspace_root.join("run_error.log");
+    if run_error_root.exists() {
+        std::fs::remove_file(run_error_root)?;
+    }
+    let run_error_tauri = workspace_root.join("src-tauri").join("run_error.log");
+    if run_error_tauri.exists() {
+        std::fs::remove_file(run_error_tauri)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::permissions_set_readonly_false)]
+pub fn remove_dir_all_force(dir: &std::path::Path) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut permissions = metadata.permissions();
+            if permissions.readonly() {
+                permissions.set_readonly(false);
+                let _ = std::fs::set_permissions(path, permissions);
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir)?;
+    Ok(())
+}
+
+pub fn handle_interrupted_compilation(workspace_root: &std::path::Path) -> std::io::Result<()> {
+    let target_dir = workspace_root.join("target");
+    remove_dir_all_force(&target_dir)
+}
+
+#[allow(clippy::permissions_set_readonly_false)]
+pub fn cleanup_post_run(workspace_root: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(entries) = std::fs::read_dir(workspace_root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "log" || ext_lower == "db" || ext_lower == "db-journal" || ext_lower == "db-wal" || ext_lower == "db-shm" {
+                        if let Ok(metadata) = std::fs::metadata(&path) {
+                            let mut permissions = metadata.permissions();
+                            if permissions.readonly() {
+                                permissions.set_readonly(false);
+                                let _ = std::fs::set_permissions(&path, permissions);
+                            }
+                        }
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+    let agnes_dir = workspace_root.join(".agnes");
+    if agnes_dir.exists() {
+        let _ = remove_dir_all_force(&agnes_dir);
+    }
+    Ok(())
 }

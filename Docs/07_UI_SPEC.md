@@ -15,6 +15,7 @@
 - **右側面板三 Tab**：🤖 代理人（22 人 G1–G6 + 待審批，功能沿用）｜✎ 變更（file_changes 列表 + diff 視圖：行號、綠底/紅底、diff/全文切換）｜📄 檔案（唯讀檢視器，>file_viewer_max_bytes 顯示過大提示）
 - **檔案變更追蹤後端**：`file_changes` 表（db.rs）+ `diffview.rs` 行級 LCS diff（`line_diff`，DP 保險絲退化全刪全增）；agent.rs write_file 在 strip_secrets 後快照前後內容，`AgentLoop::set_conversation_id` 掛載於送出與 Approve 兩路徑
 - **新組態**（GeneralConfig，皆 serde default，舊 config 可照常載入）：`right_panel_open_default=true`、`diff_view_max_lines=800`、`file_viewer_max_bytes=512000`
+- **file_changes 保留策略**（`[file_changes]` 組態節，FileChangesConfig，皆 serde default）：單筆 before/after 超過 `content_max_bytes=512000` 截斷至 UTF-8 邊界並附截斷標記；每對話只留最新 `keep_per_conversation=200` 筆（插入時刪最舊）；刪除對話時級聯清空該對話全部快照——三道閘防止全文快照讓 DB 無界成長
 - **QA 鉤子**：AGNES_QA_VIEW=global 現同步切 work_mode（與真實點擊一致）；展示對話種子腳本 `scratch/qa_seed_demo_conv.py`；v0.6 實證截圖 `qa_screenshots/v060_*.png`
 
 ## 上一輪現況（2026-06-11 第一輪）

@@ -403,8 +403,8 @@ fn capture_output(cmd: &mut Command) -> SandboxResult {
         }
     };
 
-    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_str = String::from_utf8_lossy(&output.stdout).replace('\0', "");
+    let stderr_str = String::from_utf8_lossy(&output.stderr).replace('\0', "");
     let exit_code = output.status.code();
     // 硬性對齊：只有 Exit Code == 0 且 stderr 為空才算成功
     let is_aligned_success = exit_code == Some(0) && stderr_str.trim().is_empty();
