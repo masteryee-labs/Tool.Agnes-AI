@@ -292,6 +292,21 @@ impl AgentLoop {
         }
     }
 
+    /// 以外部共享的令牌桶建構（App 級單一 20 RPM 桶）。多資料夾並行 / 多模態
+    /// 同時觸發時，所有 AgentLoop 共用同一限流器，總請求率仍受 20 RPM 約束。
+    pub fn with_rate_limiter(
+        config: Config,
+        workspace_path: String,
+        rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        Self {
+            rate_limiter,
+            config,
+            workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
+            current_conversation_id: None,
+        }
+    }
+
     /// 設定檔案變更記錄的歸屬對話 id。
     /// run_step / execute_tool 皆為 &self 無法自行設定——main.rs 在
     /// `AgentLoop::new(...)` 之後、執行工具之前呼叫本方法（見整合清單）。

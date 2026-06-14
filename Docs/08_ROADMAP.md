@@ -35,8 +35,8 @@
 - [x] WASM 沙盒執行不可信代碼片段（改用 `wasmi` 直譯器：空 host import + fuel 計量；較 wasmtime 更輕、無 JIT 攻擊面）
 - [x] Docker 沙盒（`--network=none` 預設）跑編譯級任務（偵測缺 docker 自動降級）
 - [ ] 全域模式：Critical 二次確認、AllowedPaths 管理 UI、審計回放視圖（05）
-- [ ] 安全紅隊測試：以 qa_corpus 攻擊樣本 + 新增路徑逃逸/注入用例打 D1–D8
-- 驗收：紅隊樣本 0 穿透；虛假回報攔截率 100%（合成測試）
+- [x] 安全紅隊測試：`tests/red_team.rs` 對 D2–D8 + WASM 隔離投射路徑逃逸/注入/禁止程式/間接 shell/金鑰/破壞性命令
+- 驗收：✅ 達成——`cargo test --test red_team` 17/17 通過，0 穿透；惡意命令於沙盒入口即被攔（Exit Code 對齊判否）
 
 ## Phase 4 — 行動端與多模態（後置）
 

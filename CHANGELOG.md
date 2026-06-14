@@ -4,6 +4,22 @@ All notable changes to Agnes AI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-06-14
+
+Theme: wire the parallel + multimodal capabilities into the live GUI, and add a red-team gate suite.
+
+### Added
+- **App-global shared rate limiter**: `AppState` now owns one `Arc<RateLimiter>`; `AgentLoop::with_rate_limiter` lets every agent (and the multimodal client) share a single 20 RPM bucket, so concurrent multi-folder sends plus media generation cannot collectively exceed the cap.
+- **Multi-folder parallel in the live flow**: in `handle_send`, additional selected project folders run their agent step concurrently (`futures::join_all`, shared limiter); each folder's response is appended to the chat, labeled by folder.
+- **Multimodal in the live flow**: a visual-intent prompt (`is_visual_intent`) fires `MultimodalManager::generate_image` after the agent step; the resulting URL or a graceful error is appended to the chat. Shares the global limiter.
+- **Red-team gate suite** (`src-tauri/tests/red_team.rs`, 17 tests): path traversal, shell injection, forbidden programs, indirect shells, command substitution, hardcoded secrets, destructive commands, and WASM host-import/garbage isolation — all asserted blocked (0 penetration). Malicious commands are intercepted at the sandbox entry (exit-code alignment marks them failed).
+
+### Notes
+- The Agnes image endpoint (`/v1/images/generations`) is a placeholder default; the multimodal path is fully wired and surfaces the endpoint's actual response/error. Adjust `[multimodal] image_endpoint` once the real API is confirmed.
+
+### Gates
+- `cargo clippy -D warnings` clean (default + `--features mobile`); `cargo test` green (123 + 49 + 17 + 2). Real-machine GUI verified: main view renders; a visual-intent send fires the multimodal branch and surfaces the endpoint response.
+
 ## [0.8.0] - 2026-06-14
 
 Theme: close the remaining roadmap phases — parallel dispatch, hardened sandboxes, mobile bindings, multimodal.
