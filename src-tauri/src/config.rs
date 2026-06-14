@@ -98,6 +98,43 @@ pub struct Config {
     pub file_changes: FileChangesConfig,
     #[serde(default)]
     pub model_routing: ModelRoutingConfig,
+    #[serde(default)]
+    pub multimodal: MultimodalConfig,
+}
+
+// ─── MultimodalConfig ────────────────────────────────────────────────────────
+
+/// 多模態媒體生成端點與模型（MultimodalMediaSpecialist，動態激活）。
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MultimodalConfig {
+    #[serde(default = "default_image_model")]
+    pub image_model: String,
+    #[serde(default = "default_video_model")]
+    pub video_model: String,
+    #[serde(default = "default_image_endpoint")]
+    pub image_endpoint: String,
+    #[serde(default = "default_video_endpoint")]
+    pub video_endpoint: String,
+    #[serde(default = "default_image_size")]
+    pub default_image_size: String,
+}
+
+fn default_image_model() -> String { "agnes-image-2.1-flash".to_string() }
+fn default_video_model() -> String { "agnes-video-v2.0".to_string() }
+fn default_image_endpoint() -> String { "https://apihub.agnes-ai.com/v1/images/generations".to_string() }
+fn default_video_endpoint() -> String { "https://apihub.agnes-ai.com/v1/videos/generations".to_string() }
+fn default_image_size() -> String { "1024x1024".to_string() }
+
+impl Default for MultimodalConfig {
+    fn default() -> Self {
+        Self {
+            image_model: default_image_model(),
+            video_model: default_video_model(),
+            image_endpoint: default_image_endpoint(),
+            video_endpoint: default_video_endpoint(),
+            default_image_size: default_image_size(),
+        }
+    }
 }
 
 // ─── ModelRoutingConfig ──────────────────────────────────────────────────────
@@ -202,11 +239,26 @@ pub struct SandboxConfig {
     /// 沙盒對齊失敗時回饋給模型的 stderr 行數上限（Delta-only 回饋）
     #[serde(default = "default_stderr_feedback_lines")]
     pub stderr_feedback_lines: usize,
+    /// WASM 沙盒每次執行的 fuel 上限（防止不可信模組無窮迴圈 DoS）
+    #[serde(default = "default_wasm_fuel")]
+    pub wasm_fuel: u64,
+    /// 是否啟用 Docker 沙盒（預設關閉；偵測不到 docker 時自動降級為程序沙盒）
+    #[serde(default)]
+    pub docker_enabled: bool,
+    /// Docker 沙盒使用的映像檔
+    #[serde(default = "default_docker_image")]
+    pub docker_image: String,
+    /// Docker 沙盒網路模式（預設 none，從源頭斷網）
+    #[serde(default = "default_docker_network")]
+    pub docker_network: String,
 }
 
 fn default_timeout() -> u64 { DEFAULT_TIMEOUT_SECONDS }
 fn default_max_retries() -> u32 { DEFAULT_MAX_RETRIES }
 fn default_stderr_feedback_lines() -> usize { 20 }
+fn default_wasm_fuel() -> u64 { 10_000_000 }
+fn default_docker_image() -> String { "alpine:latest".to_string() }
+fn default_docker_network() -> String { "none".to_string() }
 
 impl Default for SandboxConfig {
     fn default() -> Self {
@@ -214,6 +266,10 @@ impl Default for SandboxConfig {
             timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
             max_retries: DEFAULT_MAX_RETRIES,
             stderr_feedback_lines: default_stderr_feedback_lines(),
+            wasm_fuel: default_wasm_fuel(),
+            docker_enabled: false,
+            docker_image: default_docker_image(),
+            docker_network: default_docker_network(),
         }
     }
 }

@@ -3,13 +3,22 @@ mod db;
 pub mod diffview;
 mod locale;
 mod rate_limiter;
+mod parallel;
 mod sandbox;
 mod orchestrator;
 mod agent;
 mod mcp;
 mod memory;
+mod multimodal;
 mod skills;
 mod validation;
+
+#[cfg(feature = "mobile")]
+mod mobile;
+
+// UniFFI scaffolding：行動端綁定的進入點（僅 mobile feature 編譯）
+#[cfg(feature = "mobile")]
+uniffi::setup_scaffolding!();
 
 #[cfg(test)]
 mod tests_integration;
@@ -27,6 +36,7 @@ pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLeve
 pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
 pub use mcp::McpManager;
 pub use memory::*;
+pub use multimodal::{is_visual_intent, MediaResult, MultimodalManager};
 pub use skills::{build_skills_system_prompt, load_mcp_json, load_skills, SkillInfo};
 pub use validation::*;
 

@@ -1,0 +1,26 @@
+// Agnes AI — UniFFI 行動端介面定義（參考）
+//
+// 實作採 UniFFI proc-macro（#[uniffi::export]，見 src/mobile.rs）；本 .udl 為等價的
+// 介面定義文件，供偏好 UDL 流程的綁定產生器與行動端工程師對照。
+// 以 `--features mobile` 編譯後，用 uniffi-bindgen --library 產生 Swift/Kotlin 綁定。
+
+namespace agnes {
+    // 引擎版本字串
+    string agnes_version();
+
+    // 預設組態摘要（啟動畫面用）
+    MobileConfigSummary agnes_default_config();
+
+    // 視覺意圖偵測（確定性，離線可用）
+    boolean agnes_is_visual_intent(string prompt);
+
+    // 本地 token 估算（確定性，0 API）
+    u64 agnes_estimate_tokens(string text);
+};
+
+dictionary MobileConfigSummary {
+    string version;
+    string image_model;
+    string video_model;
+    u32 max_rpm;
+};

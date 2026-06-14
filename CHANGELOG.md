@@ -4,6 +4,24 @@ All notable changes to Agnes AI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-06-14
+
+Theme: close the remaining roadmap phases — parallel dispatch, hardened sandboxes, mobile bindings, multimodal.
+
+### Added
+- **DAG-layered parallel execution** (`src-tauri/src/parallel.rs`): `compute_dag_layers` (Kahn topological layering with cycle detection) and `run_layers_parallel` (same-layer concurrency via tokio `JoinSet`, deterministic index-ordered output). `Orchestrator::execute_multi_folder_parallel` runs independent folder builds concurrently, each with its own SQLite connection.
+- **WASM sandbox** (`sandbox::run_wasm_func`): executes untrusted WASM through the `wasmi` pure-Rust interpreter with an empty `Linker` (no host imports → no I/O/syscalls/network) and fuel metering (bounds infinite loops). `SandboxConfig.wasm_fuel` is config-driven.
+- **Docker sandbox** (`sandbox::run_in_docker_sandbox`): runs compile-level tasks in a container with `--network=none`, `--rm`, workspace mounted at `/work`; vectorized args (no shell). Detects a missing docker CLI and degrades gracefully. `SandboxConfig.docker_image` / `docker_network` / `docker_enabled` are config-driven.
+- **UniFFI mobile bindings** (`src-tauri/src/mobile.rs` + `src/agnes.udl`), behind the `mobile` cargo feature: exports `agnes_version`, `agnes_default_config`, `agnes_is_visual_intent`, `agnes_estimate_tokens` for iOS/Android shells via `uniffi-bindgen`. The default desktop build is unaffected.
+- **Multimodal media** (`src-tauri/src/multimodal.rs`): `MultimodalManager` clients for Agnes Image 2.1 Flash / Agnes-Video-V2.0 with deterministic `is_visual_intent` activation; every media call passes through the shared rate limiter (counts toward 20 RPM). Endpoints/models in `MultimodalConfig`.
+
+### Changed
+- `Orchestrator::dispatch_subagents` rewritten to call validation once and order results by DAG layer, removing the previous O(n²) loop that re-ran the full batch up to 50 times. Output set and verdicts are unchanged.
+
+### Engineering notes
+- WASM uses `wasmi` (interpreter) rather than `wasmtime` (JIT): no JIT attack surface, no system dependencies, fast compile; empty linker + fuel already give full isolation for untrusted snippets.
+- Gates: `cargo clippy -D warnings` clean (default and `--features mobile`); `cargo test` green (123 + 49 + 2).
+
 ## [0.7.0] - 2026-06-14
 
 Theme: strengthen security and cut Agnes API request count.

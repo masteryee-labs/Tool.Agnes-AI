@@ -23,7 +23,7 @@
 
 ## Phase 2 — 並行調度 + Token 經濟（2 週）
 
-- [ ] `dispatch_subagents` 改 DAG + tokio JoinSet 同層並行（01）
+- [x] `dispatch_subagents` 改 DAG 分層 + tokio JoinSet 同層並行原語（`parallel.rs`）；`execute_multi_folder_parallel` 多資料夾並行（驗證 gate 並行沿用 `thread::scope`）（01）
 - [ ] TokenBudgeter + 非對稱模型路由表 + 提示前綴快取對齊（04）
 - [ ] Delta-only：unified diff 強制 + `apply_patch()` 驗證
 - [ ] UI：Token 計量表、代理人狀態樹、ConfirmationGate 面板補完（07）
@@ -32,17 +32,17 @@
 
 ## Phase 3 — 沙盒強化 + 全域模式完備（2 週）
 
-- [ ] WASM 沙盒（wasmtime）執行不可信代碼片段
-- [ ] Docker 沙盒（`--network=none` 預設）跑編譯級任務
+- [x] WASM 沙盒執行不可信代碼片段（改用 `wasmi` 直譯器：空 host import + fuel 計量；較 wasmtime 更輕、無 JIT 攻擊面）
+- [x] Docker 沙盒（`--network=none` 預設）跑編譯級任務（偵測缺 docker 自動降級）
 - [ ] 全域模式：Critical 二次確認、AllowedPaths 管理 UI、審計回放視圖（05）
 - [ ] 安全紅隊測試：以 qa_corpus 攻擊樣本 + 新增路徑逃逸/注入用例打 D1–D8
 - 驗收：紅隊樣本 0 穿透；虛假回報攔截率 100%（合成測試）
 
 ## Phase 4 — 行動端與多模態（後置）
 
-- [ ] UniFFI 綁定（agnes.udl）、iOS/Android 殼層
-- [ ] MultimodalMediaSpecialist 接 Agnes Image 2.1 Flash / Agnes-Video-V2.0
-- [ ] 行動端沙盒降級策略（無 Docker → WASM/行程隔離）
+- [x] UniFFI 綁定（`agnes.udl` + proc-macro，`--features mobile`）；iOS/Android 殼層待接已產生的綁定
+- [x] MultimodalMediaSpecialist 接 Agnes Image 2.1 Flash / Agnes-Video-V2.0（`multimodal.rs`，動態激活、共用限流器）
+- [x] 行動端沙盒降級策略（無 Docker → `run_in_docker_sandbox` 自動回退；WASM/行程隔離可選）
 
 ## 持續性紀律（每個 Phase 通用）
 

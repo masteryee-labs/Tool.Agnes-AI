@@ -1,6 +1,6 @@
 ﻿[package]
 name = "agnes-ai"
-version = "0.7.0"
+version = "0.8.0"
 description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
 authors = ["Agnes Team"]
 edition = "2021"
@@ -29,6 +29,14 @@ sha2 = "0.10"
 tempfile = "3.10"
 chrono = { version = "0.4", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# WASM 沙盒：純 Rust 直譯器（無 JIT、無系統依賴）；空 host import + fuel 計量 → 不可信代碼隔離執行
+wasmi = "0.31"
+# 行動端 UniFFI 綁定（iOS/Android）；僅 `--features mobile` 啟用，桌面建構不受影響
+uniffi = { version = "0.28", optional = true }
+
+[features]
+# 行動端綁定：開啟後 lib 匯出 UniFFI scaffolding（見 src/mobile.rs、src/agnes.udl）
+mobile = ["dep:uniffi"]
 
 [[bin]]
 name = "agnes-ai"
