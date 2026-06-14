@@ -8,7 +8,7 @@
   rules:
     - Gate 1 [DestructiveCheck]: 掃描命令是否包含 rm -rf、format、del、Remove-Item 等破壞性操作
     - Gate 2 [PathScopeVerification]: 全域模式下必須驗證執行路徑在允許列表中
-    - Gate 3 [SubagentAudit]: 審查 17 代理人分工是否正確路由
+    - Gate 3 [SubagentAudit]: 審查 22 代理人分工是否正確路由
     - Gate 4 [ExecutionLog]: 記錄所有已批准/拒絕的動作於 Audit Log
 
 @struct AllowedPaths
