@@ -242,52 +242,44 @@ impl Orchestrator {
         messages: &[serde_json::Value],
     ) -> (Vec<AuditResult>, Vec<PendingAction>) {
         let agents = SubAgent::all_agents();
-        let mut all_audits: Vec<AuditResult> = Vec::with_capacity(22);
         let mut pending: Vec<PendingAction> = Vec::new();
 
-        // Topological sort: run agents in priority order
-        let mut executed = HashMap::new();
-        let mut max_iterations = 50;
+        // 驗證為確定性批次運算（run_all_gates 內部已以 thread::scope 並行 Stage A），
+        // 整批呼叫一次即可——取代舊版最多 50 圈、每圈重跑整批的 O(n²) 浪費。
+        let batch = AgentEngine.run_validation(&self.config, tool_calls, messages);
 
-        while executed.len() < agents.len() && max_iterations > 0 {
-            max_iterations -= 1;
-            let mut made_progress = false;
+        // 依前置依賴建索引並用 Kahn 拓樸分層（同層彼此獨立、可並行）。
+        let role_index: HashMap<&str, usize> = agents
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.role.as_str(), i))
+            .collect();
+        let prereqs: Vec<Vec<usize>> = agents
+            .iter()
+            .map(|a| {
+                a.prerequisites
+                    .iter()
+                    .filter_map(|p| role_index.get(p.as_str()).copied())
+                    .collect()
+            })
+            .collect();
+        let layers = crate::parallel::compute_dag_layers(agents.len(), &prereqs)
+            .unwrap_or_else(|_| vec![(0..agents.len()).collect()]);
 
-            for agent in &agents {
-                if executed.contains_key(&agent.role) {
-                    continue;
+        // 依 DAG 層序彙整每個代理人的裁決；批次中找不到對應 gate 者記為 SKIPPED
+        // （與舊版「agent_name == role 才採用、其餘跳過」語意一致）。
+        let mut all_audits: Vec<AuditResult> = Vec::with_capacity(agents.len());
+        for layer in &layers {
+            for &i in layer {
+                let role = agents[i].role.as_str();
+                match batch.iter().find(|a| a.agent_name == role) {
+                    Some(found) => all_audits.push(found.clone()),
+                    None => all_audits.push(AuditResult {
+                        agent_name: role.to_string(),
+                        verdict: "SKIPPED (prerequisite failed)".into(),
+                        reason: "前置角色驗證未通過，此角色跳過。".into(),
+                    }),
                 }
-                let prereqs_met = agent.prerequisites.iter().all(|p| executed.contains_key(p));
-                if !prereqs_met {
-                    continue;
-                }
-
-                // Run all 17 validations, pick this agent's result
-                let audits = AgentEngine.run_validation(&self.config, tool_calls, messages);
-                for audit in &audits {
-                    if audit.agent_name == agent.role {
-                        all_audits.push(audit.clone());
-                        executed.insert(agent.role.clone(), audit.verdict.clone());
-                        made_progress = true;
-                    }
-                }
-            }
-
-            if !made_progress {
-                break;
-            }
-        }
-
-        // Auto-skip agents whose prereqs failed
-        let agent_roles: Vec<&str> = agents.iter().map(|a| a.role.as_str()).collect();
-        let already_done: Vec<String> = all_audits.iter().map(|a| a.agent_name.clone()).collect();
-        for role in agent_roles {
-            if !already_done.contains(&role.to_string()) {
-                all_audits.push(AuditResult {
-                    agent_name: role.to_string(),
-                    verdict: "SKIPPED (prerequisite failed)".into(),
-                    reason: "前置角色驗證未通過，此角色跳過。".into(),
-                });
             }
         }
 
@@ -375,6 +367,67 @@ impl Orchestrator {
         }
 
         Ok(results)
+    }
+
+    /// 多資料夾並行版：各資料夾彼此獨立，以 tokio JoinSet（spawn_blocking）同時跑
+    /// 自愈建構，牆鐘約等於最慢的單一資料夾而非總和。每個並行任務開自己的 SQLite
+    /// 連線（rusqlite Connection 非 Sync，不可跨執行緒共用）。
+    pub async fn execute_multi_folder_parallel(
+        &self,
+        db_path: &std::path::Path,
+        task_id: &str,
+        program: &str,
+        args: &[&str],
+    ) -> HashMap<String, bool> {
+        let folders = self.workspace_folders.clone();
+        let n = folders.len();
+        if n == 0 {
+            return HashMap::new();
+        }
+        // 資料夾間無相互依賴 → 單層全並行
+        let layers = vec![(0..n).collect::<Vec<usize>>()];
+
+        let config = self.config.clone();
+        let db_path = db_path.to_path_buf();
+        let task_id = task_id.to_string();
+        let program = program.to_string();
+        let owned_args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+
+        let pairs = crate::parallel::run_layers_parallel(n, &layers, |i| {
+            let folder = folders[i].clone();
+            let config = config.clone();
+            let db_path = db_path.clone();
+            let task_id = task_id.clone();
+            let program = program.clone();
+            let owned_args = owned_args.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let folder_name = folder
+                        .file_name()
+                        .map(|nm| nm.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let orch = Orchestrator {
+                        config,
+                        workspace_folders: vec![folder.clone()],
+                    };
+                    let arg_refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
+                    let success = match crate::open_connection(&db_path) {
+                        Ok(conn) => orch
+                            .execute_task_with_healing(
+                                &conn, &task_id, &program, &arg_refs, Some(&folder),
+                            )
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    };
+                    (folder_name, success)
+                })
+                .await
+                .unwrap_or_else(|_| ("unknown".to_string(), false))
+            }
+        })
+        .await;
+
+        pairs.into_iter().collect()
     }
 
     // ── Global mode: computer automation with safety gate chain ──

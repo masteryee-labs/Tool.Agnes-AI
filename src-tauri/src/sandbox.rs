@@ -536,3 +536,172 @@ pub fn run_in_sandbox(
         run_with_locale(&mut cmd, "shell", full_access)
     }
 }
+
+// ─── WASM 沙盒（wasmi 純 Rust 直譯器）─────────────────────────────────────────
+//
+// 用途：執行不可信 WASM 代碼片段。隔離保證來自兩道機制：
+//  1. 空 Linker（不提供任何 host import）→ 模組無法呼叫 I/O / syscall / 網路；
+//     任何嘗試匯入 host 函式的模組會在實例化階段失敗，被安全拒絕。
+//  2. fuel 計量上限 → 不可信模組的無窮迴圈會在 fuel 耗盡時 trap，防止 DoS。
+// 直譯器無 JIT，無動態代碼產生攻擊面。參數/結果限定 i32（整數運算）。
+
+/// 在完全隔離環境執行 WASM 匯出函式，回傳 i32 結果向量。
+pub fn run_wasm_func(
+    wasm_bytes: &[u8],
+    func_name: &str,
+    params: &[i32],
+    fuel: u64,
+) -> Result<Vec<i32>, String> {
+    let mut config = wasmi::Config::default();
+    config.consume_fuel(true);
+    let engine = wasmi::Engine::new(&config);
+    let module = wasmi::Module::new(&engine, wasm_bytes)
+        .map_err(|e| format!("WASM 模組解析失敗: {}", e))?;
+    let mut store = wasmi::Store::new(&engine, ());
+    store
+        .add_fuel(fuel)
+        .map_err(|e| format!("fuel 設定失敗: {}", e))?;
+    // 空 Linker：含 host import 的模組會在實例化失敗 → 安全拒絕
+    let linker = wasmi::Linker::<()>::new(&engine);
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("WASM 實例化失敗（可能含 host import）: {}", e))?
+        .start(&mut store)
+        .map_err(|e| format!("WASM 啟動失敗: {}", e))?;
+    let func = instance
+        .get_func(&store, func_name)
+        .ok_or_else(|| format!("找不到匯出函式 '{}'", func_name))?;
+    let inputs: Vec<wasmi::Value> = params.iter().map(|&p| wasmi::Value::I32(p)).collect();
+    let result_count = func.ty(&store).results().len();
+    let mut outputs = vec![wasmi::Value::I32(0); result_count];
+    func.call(&mut store, &inputs, &mut outputs)
+        .map_err(|e| format!("WASM 執行失敗（可能 fuel 耗盡或型別不符）: {}", e))?;
+    Ok(outputs
+        .iter()
+        .map(|v| match v {
+            wasmi::Value::I32(x) => *x,
+            _ => 0,
+        })
+        .collect())
+}
+
+// ─── Docker 沙盒（--network=none 預設斷網）────────────────────────────────────
+
+/// 偵測 docker CLI 是否可用（執行 `docker --version`，瞬時且無副作用）。
+pub fn docker_available() -> bool {
+    Command::new("docker")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// 組裝 `docker run` 引數向量（純函式，便於測試；引數向量化、無 shell 拼接）。
+fn build_docker_args(
+    program: &str,
+    args: &[&str],
+    ws: &str,
+    image: &str,
+    network: &str,
+) -> Vec<String> {
+    let mut v = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        format!("--network={}", network),
+        "-v".to_string(),
+        format!("{}:/work", ws),
+        "-w".to_string(),
+        "/work".to_string(),
+        image.to_string(),
+        program.to_string(),
+    ];
+    v.extend(args.iter().map(|a| a.to_string()));
+    v
+}
+
+/// 在 Docker 容器內執行編譯級任務：工作區掛載為 /work、`--network=none` 斷網、
+/// `--rm` 即用即棄。容器本身即為隔離邊界；引數向量化故無 shell 注入面。
+/// docker 不可用時回傳對齊失敗（exit 127），呼叫端可降級至 `run_in_sandbox`。
+pub fn run_in_docker_sandbox(
+    program: &str,
+    args: &[&str],
+    workspace: &Path,
+    image: &str,
+    network: &str,
+) -> SandboxResult {
+    if !docker_available() {
+        return SandboxResult {
+            exit_code: Some(127),
+            stdout: String::new(),
+            stderr: "docker 不可用：請安裝 Docker，或改用程序沙盒 run_in_sandbox".to_string(),
+            is_aligned_success: false,
+        };
+    }
+    let ws = workspace.to_string_lossy().to_string();
+    let docker_args = build_docker_args(program, args, &ws, image, network);
+    let mut cmd = Command::new("docker");
+    cmd.args(&docker_args);
+    capture_output(&mut cmd)
+}
+
+// ─── 沙盒運行測試（SandboxRuntimeTester）──────────────────────────────────────
+
+#[cfg(test)]
+mod sandbox_runtime_tests {
+    use super::*;
+
+    /// 最小 WASM 模組：(func (export "add") (param i32 i32) (result i32)
+    ///   local.get 0  local.get 1  i32.add)
+    const ADD_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // "\0asm" + version 1
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type: (i32,i32)->i32
+        0x03, 0x02, 0x01, 0x00, // function section
+        0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add" → func0
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // code
+    ];
+
+    #[test]
+    fn test_wasm_runs_isolated_add() {
+        let out = run_wasm_func(ADD_WASM, "add", &[2, 3], 10_000_000).unwrap();
+        assert_eq!(out, vec![5]);
+    }
+
+    #[test]
+    fn test_wasm_missing_export_errors() {
+        assert!(run_wasm_func(ADD_WASM, "nope", &[1, 2], 10_000_000).is_err());
+    }
+
+    #[test]
+    fn test_wasm_fuel_exhaustion_blocks() {
+        // fuel = 0 → 不可信模組無法推進 → Err（DoS 防護生效）
+        assert!(run_wasm_func(ADD_WASM, "add", &[2, 3], 0).is_err());
+    }
+
+    #[test]
+    fn test_wasm_rejects_garbage_bytes() {
+        assert!(run_wasm_func(&[0, 1, 2, 3], "add", &[1, 2], 1000).is_err());
+    }
+
+    #[test]
+    fn test_docker_args_enforce_isolation() {
+        let a = build_docker_args("cargo", &["build", "--release"], "/ws", "rust:latest", "none");
+        assert!(a.contains(&"--network=none".to_string()));
+        assert!(a.contains(&"--rm".to_string()));
+        assert!(a.contains(&"rust:latest".to_string()));
+        assert!(a.contains(&"cargo".to_string()));
+        assert!(a.contains(&"build".to_string()));
+        assert!(a.windows(2).any(|w| w[0] == "-v" && w[1] == "/ws:/work"));
+        // program 排在 image 之後（容器內執行的命令）
+        let img_pos = a.iter().position(|x| x == "rust:latest").unwrap();
+        let prog_pos = a.iter().position(|x| x == "cargo").unwrap();
+        assert!(prog_pos > img_pos);
+    }
+
+    #[test]
+    fn test_docker_detection_does_not_panic() {
+        // 不論本機是否安裝 docker，偵測都必須回傳 bool 而不 panic（不啟動任何容器）。
+        let _ = docker_available();
+    }
+}

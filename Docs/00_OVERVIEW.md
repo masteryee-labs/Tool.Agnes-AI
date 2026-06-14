@@ -23,7 +23,7 @@
 
 - `orchestrator.rs` — Orchestrator、SubAgent 調度、ConfirmationGate、PendingAction 風險分級、自愈執行 `execute_task_with_healing`、多資料夾 `execute_multi_folder`、全域模式 `global_execute`
 - `agent.rs` — AgentLoop（run_step / parse_tool_calls / execute_tool）、AuditResult 一票否決機制
-- `sandbox.rs` — 引數向量化分離、程式白名單/黑名單、路徑越界檢查、間接 shell 注入檢查、`run_in_sandbox` Exit Code + Stderr 硬性擷取
+- `sandbox.rs` — 引數向量化分離、程式白名單/黑名單、路徑越界檢查、間接 shell 注入檢查、`run_in_sandbox` Exit Code + Stderr 硬性擷取；WASM 沙盒 `run_wasm_func`（wasmi 直譯器：空 host import + fuel 計量隔離不可信代碼）、Docker 沙盒 `run_in_docker_sandbox`（`--network=none` 斷網、偵測缺失自動降級）
 - `db.rs` — SQLite 確定性狀態機：tasks / execution_logs / audit_logs / projects / conversations
 - `config.rs` — `config.local.toml` 金鑰隔離、`ensure_gitignore` 自動屏蔽、全組態結構體（零 Magic Number）
 - `locale.rs` — Windows `chcp 65001` / Unix `LANG=zh_TW.UTF-8` 語系校準
@@ -31,6 +31,9 @@
 - `skills.rs` — Claude 互通層：`.claude/skills/*/SKILL.md` 技能、`CLAUDE.md` 規則、`.mcp.json` MCP 設定的確定性解析與系統提示注入
 - `memory.rs` — 滑動視窗分塊 + 三階段漏斗 RAG + FTS5 索引；Stage 0 本機記憶查詢命中即跳過檢索 API，Stage 1+2 已合併為單次呼叫
 - `rate_limiter.rs` — 全域共享令牌桶限流器：把關每一個 Agnes API 呼叫，20 RPM 上限、`acquire()` 等待補充而非拒絕、429 倍率式指數退避；`max_rpm = 0` 可停用上限（測試用）
+- `parallel.rs` — DAG 分層並行原語：`compute_dag_layers`（Kahn 拓樸、偵測環）+ `run_layers_parallel`（同層 tokio JoinSet 並行、確定性還原）；`dispatch_subagents` 改用分層、`execute_multi_folder_parallel` 多資料夾並行建構
+- `multimodal.rs` — MultimodalMediaSpecialist（動態激活）：Agnes Image 2.1 Flash / Video V2.0 客戶端，`is_visual_intent` 確定性意圖偵測，媒體呼叫共用 rate_limiter
+- `mobile.rs` + `agnes.udl` — UniFFI 行動端綁定（`--features mobile`）：版本、組態摘要、視覺意圖、token 估算等確定性 API 匯出供 iOS/Android 殼層
 - `ui/` — egui 前端原型（22 代理人側欄、Projects、工作區、標題列即時預算計）
 - `.agent/rules/` — core.agents.toon（22 代理人）、security_policies.toon、confirmation_gate.toon
 - `tests_integration.rs` — 整合測試；`tests/e2e_tests.rs` — 端到端測試；`tests/fixtures/qa_corpus/` — QA 回歸語料庫（`cargo test qa_replay`）
@@ -45,9 +48,11 @@
 | 3 | 全自動 QA：回歸測試語料庫（`tests/fixtures/qa_corpus/` + `cargo test qa_replay`）、e2e 測試（`tests/e2e_tests.rs`）、提示詞自修正 | 03 | P0 | 實作完成 |
 | 4 | 寫檔前 22 道交叉驗證管線形式化 | 06 | P1 | 實作完成 |
 | 5 | Token 經濟：TokenBudgeter 預算器、全域令牌桶限流器（`rate_limiter.rs`，20 RPM + 429 退避）、Stage 0 FTS5 旁路、Stage 1+2 合併 | 04 | P1 | 實作完成 |
-| 6 | 多子代理人並行執行：DAG 拓樸排序（prerequisites 前置依賴）已實作，惟 `dispatch_subagents` 仍為順序執行，同層 tokio JoinSet 並行待辦（Phase 2） | 01、08 | P1 | 部分 |
-| 7 | WASM 沙盒（wasmtime）與 Docker 沙盒 `--network=none`（Phase 3） | 05、08 | P2 | 待辦 |
-| 8 | UniFFI 行動端綁定與多模態媒體（Phase 4） | 08 | P3 | 待辦 |
+| 6 | 多子代理人並行執行：`parallel.rs` 提供 Kahn 分層 + 同層 tokio JoinSet 並行引擎；`dispatch_subagents` 改 DAG 分層（去除 O(n²) 重跑）、`execute_multi_folder_parallel` 多資料夾並行 | 01、08 | P1 | 實作完成 |
+| 7 | WASM 沙盒（`run_wasm_func`，wasmi 直譯器 + 空 host import + fuel）與 Docker 沙盒（`run_in_docker_sandbox`，`--network=none`）| 05、08 | P2 | 實作完成 |
+| 8 | UniFFI 行動端綁定（`mobile.rs` + `agnes.udl`，`--features mobile`）與多模態媒體（`multimodal.rs`，動態激活）| 08 | P3 | 實作完成 |
+
+> 工程備註：WASM 沙盒選用 `wasmi`（純 Rust 直譯器）而非 `wasmtime`——對「執行不可信片段」而言，直譯器無 JIT 攻擊面、無系統依賴、編譯極輕，且空 Linker + fuel 即達完全隔離，較重量級 JIT 更契合本專案的高防禦與極速定位。UniFFI 採官方現行 proc-macro 法，`agnes.udl` 作為等價介面定義文件並存。多資料夾並行與多模態為「已實作並單元測試的函式庫能力」，接入 GUI 即時流程為後續整合步驟。
 
 ## 鋼鐵戒律（全專案不可違反）
 
