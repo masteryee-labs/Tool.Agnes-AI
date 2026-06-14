@@ -1560,7 +1560,7 @@ impl AgnesApp {
     }
 
     fn handle_send(&self, ctx: &egui::Context) {
-        let (_prompt, conversation_id, config, workspace_path) = {
+        let (prompt, conversation_id, config, workspace_path, extra_folders) = {
             let mut st = self.ui_state.lock().unwrap();
             let prompt = st.chat_input.clone();
             if prompt.trim().is_empty() { return; }
@@ -1615,7 +1615,18 @@ impl AgnesApp {
                 })
                 .unwrap_or_default();
 
-            (prompt, conv_id, self.app_state.config.clone(), workspace)
+            // 多資料夾並行：主工作區以外、其餘被勾選的資料夾（依專案宣告順序）
+            let extra_folders: Vec<String> = st.selected_project_idx
+                .and_then(|i| st.projects.get(i))
+                .map(|p| {
+                    p.paths.iter()
+                        .filter(|path| st.selected_paths.contains(*path) && **path != workspace)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            (prompt, conv_id, self.app_state.config.clone(), workspace, extra_folders)
         };
 
         // Reload conversation list
@@ -1636,7 +1647,11 @@ impl AgnesApp {
                 *s = AgentExecutionState::Running(std::time::Instant::now());
             }
 
-            let mut agent_loop = AgentLoop::new(config.lock().unwrap().clone(), workspace_path);
+            let mut agent_loop = AgentLoop::with_rate_limiter(
+                config.lock().unwrap().clone(),
+                workspace_path,
+                app_state_task.rate_limiter.clone(),
+            );
             // 寫檔自動記入 file_changes（變更面板資料來源）
             agent_loop.set_conversation_id(&conversation_id);
             let mut messages = Vec::new();
@@ -1648,6 +1663,10 @@ impl AgnesApp {
                     }
                 }
             }
+
+            // 額外資料夾並行用的基準訊息（與主工作區相同輸入），僅需要時複製
+            let base_messages: Vec<serde_json::Value> =
+                if extra_folders.is_empty() { Vec::new() } else { messages.clone() };
 
             let step_result = agent_loop.run_step(
                 &mut messages,
@@ -1714,6 +1733,89 @@ impl AgnesApp {
                         ui_state.lock().unwrap().status_message = format!("Error: {}", e);
                     }
                 }
+            }
+
+            // ── 多資料夾並行：其餘被勾選的資料夾以共享令牌桶並行執行，結果附加顯示 ──
+            if !aborted && !extra_folders.is_empty() {
+                let extra_loops: Vec<AgentLoop> = extra_folders
+                    .iter()
+                    .map(|f| {
+                        let mut al = AgentLoop::with_rate_limiter(
+                            config.lock().unwrap().clone(),
+                            f.clone(),
+                            app_state_task.rate_limiter.clone(),
+                        );
+                        al.set_conversation_id(&conversation_id);
+                        al
+                    })
+                    .collect();
+                let mut msg_sets: Vec<Vec<serde_json::Value>> =
+                    vec![base_messages.clone(); extra_folders.len()];
+                let futs: Vec<_> = extra_loops
+                    .iter()
+                    .zip(msg_sets.iter_mut())
+                    .map(|(al, m)| {
+                        al.run_step(
+                            m,
+                            &app_state_task.mcp_manager,
+                            &app_state_task.token_budgeter,
+                            &app_state_task.db_path,
+                        )
+                    })
+                    .collect();
+                let results = futures::future::join_all(futs).await;
+                if let Ok(conn) = app_lib::open_connection(&app_state_task.db_path) {
+                    let mut st = ui_state.lock().unwrap();
+                    for (folder, res) in extra_folders.iter().zip(results) {
+                        let name = std::path::Path::new(folder)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| folder.clone());
+                        let body = match res {
+                            Ok(step) => format!("[資料夾 {}]\n{}", name, step.response_text),
+                            Err(e) => format!("[資料夾 {}] 執行失敗：{}", name, e),
+                        };
+                        let _ = app_lib::add_conversation_message(
+                            &conn, &conversation_id, "assistant", &body,
+                        );
+                        st.active_messages
+                            .push(ChatMessage { role: "assistant".into(), content: body });
+                    }
+                }
+            }
+
+            // ── 多模態：偵測到視覺意圖則生成圖片，結果附加顯示（共用令牌桶，計入 20 RPM）──
+            if !aborted && app_lib::is_visual_intent(&prompt) {
+                let (mm_cfg, api_key) = {
+                    let c = config.lock().unwrap();
+                    (c.multimodal.clone(), c.api.key.clone())
+                };
+                let client = app_state_task.http_client.lock().await.clone();
+                let mgr = app_lib::MultimodalManager::new(mm_cfg, api_key);
+                let body = match mgr
+                    .generate_image(&client, &app_state_task.rate_limiter, &prompt)
+                    .await
+                {
+                    Ok(media) => {
+                        if let Some(u) = media.url {
+                            format!("[多模態] 已生成圖片：{}", u)
+                        } else if media.b64.is_some() {
+                            "[多模態] 已生成圖片（base64 內嵌回應）".to_string()
+                        } else {
+                            "[多模態] 已收到回應但無圖片資料".to_string()
+                        }
+                    }
+                    Err(e) => format!("[多模態] 圖片生成未完成：{}", e),
+                };
+                if let Ok(conn) = app_lib::open_connection(&app_state_task.db_path) {
+                    let _ =
+                        app_lib::add_conversation_message(&conn, &conversation_id, "tool", &body);
+                }
+                ui_state
+                    .lock()
+                    .unwrap()
+                    .active_messages
+                    .push(ChatMessage { role: "tool".into(), content: body });
             }
 
             if !aborted {

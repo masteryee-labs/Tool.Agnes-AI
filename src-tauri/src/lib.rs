@@ -31,6 +31,7 @@ pub use db::*;
 pub use diffview::*;
 pub use locale::*;
 pub use sandbox::*;
+pub use rate_limiter::RateLimiter;
 pub use orchestrator::Orchestrator;
 pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLevel};
 pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
@@ -108,6 +109,9 @@ pub struct AppState {
     pub engine_runtime: Runtime,
     /// Pooled reqwest client — shared across all API calls.
     pub http_client: Arc<Mutex<reqwest::Client>>,
+    /// App 級共享令牌桶：所有 Agent / 多模態呼叫共用同一 20 RPM 桶，
+    /// 即使多資料夾並行或多模態同時觸發也不會突破限速。
+    pub rate_limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -118,6 +122,9 @@ impl AppState {
 
         let session_budget = config.lock().unwrap().api.session_budget;
         let token_budgeter = Mutex::new(TokenBudgeter::new(session_budget));
+
+        let max_rpm = config.lock().unwrap().api.max_rpm;
+        let rate_limiter = Arc::new(RateLimiter::new(max_rpm));
 
         let timeout_secs = config.lock().unwrap().sandbox.timeout_seconds;
         let http_client = Arc::new(Mutex::new(
@@ -137,6 +144,7 @@ impl AppState {
             token_budgeter,
             engine_runtime,
             http_client,
+            rate_limiter,
         })
     }
 }
