@@ -1790,10 +1790,9 @@ impl AgnesApp {
                     let c = config.lock().unwrap();
                     (c.multimodal.clone(), c.api.key.clone())
                 };
-                let client = app_state_task.http_client.lock().await.clone();
                 let mgr = app_lib::MultimodalManager::new(mm_cfg, api_key);
                 let body = match mgr
-                    .generate_image(&client, &app_state_task.rate_limiter, &prompt)
+                    .generate_image(&app_state_task.rate_limiter, &prompt)
                     .await
                 {
                     Ok(media) => {

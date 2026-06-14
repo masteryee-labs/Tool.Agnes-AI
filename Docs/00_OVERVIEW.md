@@ -52,7 +52,7 @@
 | 7 | WASM 沙盒（`run_wasm_func`，wasmi 直譯器 + 空 host import + fuel）與 Docker 沙盒（`run_in_docker_sandbox`，`--network=none`）| 05、08 | P2 | 實作完成 |
 | 8 | UniFFI 行動端綁定（`mobile.rs` + `agnes.udl`，`--features mobile`）與多模態媒體（`multimodal.rs`，動態激活）| 08 | P3 | 實作完成 |
 
-> 工程備註：WASM 沙盒選用 `wasmi`（純 Rust 直譯器）而非 `wasmtime`——對「執行不可信片段」而言，直譯器無 JIT 攻擊面、無系統依賴、編譯極輕，且空 Linker + fuel 即達完全隔離，較重量級 JIT 更契合本專案的高防禦與極速定位。UniFFI 採官方現行 proc-macro 法，`agnes.udl` 作為等價介面定義文件並存。多資料夾並行與多模態已於 v0.8.1 接入 GUI 即時流程（`handle_send`）：App 級共享令牌桶（`AppState.rate_limiter`）讓並行的多資料夾代理與多模態呼叫共用同一 20 RPM 桶；視覺意圖（`is_visual_intent`）觸發圖片生成並將結果/錯誤回貼聊天。安全紅隊測試見 `tests/red_team.rs`（D2–D8 + WASM 隔離，17/17，0 穿透）。
+> 工程備註：WASM 沙盒選用 `wasmi`（純 Rust 直譯器）而非 `wasmtime`——對「執行不可信片段」而言，直譯器無 JIT 攻擊面、無系統依賴、編譯極輕，且空 Linker + fuel 即達完全隔離，較重量級 JIT 更契合本專案的高防禦與極速定位。UniFFI 採官方現行 proc-macro 法，`agnes.udl` 作為等價介面定義文件並存。多資料夾並行與多模態已於 v0.8.1 接入 GUI 即時流程（`handle_send`）：App 級共享令牌桶（`AppState.rate_limiter`）讓並行的多資料夾代理與多模態呼叫共用同一 20 RPM 桶；視覺意圖（`is_visual_intent`）觸發圖片生成並回貼聊天——端點 `POST /v1/images/generations` 已實測回真實圖片 URL（~40–50s/張，故 `multimodal.timeout_seconds` 預設 180s；影片端點為單數 `/v1/video/generations`）。安全紅隊測試見 `tests/red_team.rs`（D2–D8 + WASM 隔離，17/17，0 穿透）。
 
 ## 鋼鐵戒律（全專案不可違反）
 
