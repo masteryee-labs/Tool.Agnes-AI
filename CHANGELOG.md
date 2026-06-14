@@ -14,11 +14,11 @@ Theme: wire the parallel + multimodal capabilities into the live GUI, and add a 
 - **Multimodal in the live flow**: a visual-intent prompt (`is_visual_intent`) fires `MultimodalManager::generate_image` after the agent step; the resulting URL or a graceful error is appended to the chat. Shares the global limiter.
 - **Red-team gate suite** (`src-tauri/tests/red_team.rs`, 17 tests): path traversal, shell injection, forbidden programs, indirect shells, command substitution, hardcoded secrets, destructive commands, and WASM host-import/garbage isolation — all asserted blocked (0 penetration). Malicious commands are intercepted at the sandbox entry (exit-code alignment marks them failed).
 
-### Notes
-- The Agnes image endpoint (`/v1/images/generations`) is a placeholder default; the multimodal path is fully wired and surfaces the endpoint's actual response/error. Adjust `[multimodal] image_endpoint` once the real API is confirmed.
+### Fixed
+- **Multimodal endpoints confirmed against the live API and corrected.** Image: `POST /v1/images/generations` returns a generated image URL (`data[0].url`) in ~40–50s. Video: `POST /v1/video/generations` (Agnes is asymmetric — plural `images`, singular `video`; the previous `/v1/videos/generations` default was a 404). Because generation is slow, the multimodal client now uses a dedicated long timeout (`[multimodal] timeout_seconds`, default 180s) instead of the 30s text/tool timeout that caused the earlier "error sending request" failure.
 
 ### Gates
-- `cargo clippy -D warnings` clean (default + `--features mobile`); `cargo test` green (123 + 49 + 17 + 2). Real-machine GUI verified: main view renders; a visual-intent send fires the multimodal branch and surfaces the endpoint response.
+- `cargo clippy -D warnings` clean (default + `--features mobile`); `cargo test` green (123 + 49 + 17 + 2). Real-machine GUI verified: main view renders; a visual-intent send (「畫一隻戴帽子的柴犬插圖」) returns a real Agnes-generated image URL in the chat (~41s).
 
 ## [0.8.0] - 2026-06-14
 

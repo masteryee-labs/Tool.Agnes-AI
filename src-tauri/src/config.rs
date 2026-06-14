@@ -117,13 +117,19 @@ pub struct MultimodalConfig {
     pub video_endpoint: String,
     #[serde(default = "default_image_size")]
     pub default_image_size: String,
+    /// 媒體生成 HTTP 逾時秒數。實測 Agnes Image 2.1 Flash 單張約 ~50s，故預設遠高於
+    /// 一般 API 逾時（不可沿用 30s 文字逾時，否則必逾時失敗）。
+    #[serde(default = "default_media_timeout")]
+    pub timeout_seconds: u64,
 }
 
 fn default_image_model() -> String { "agnes-image-2.1-flash".to_string() }
 fn default_video_model() -> String { "agnes-video-v2.0".to_string() }
 fn default_image_endpoint() -> String { "https://apihub.agnes-ai.com/v1/images/generations".to_string() }
-fn default_video_endpoint() -> String { "https://apihub.agnes-ai.com/v1/videos/generations".to_string() }
+// 注意：Agnes 端點命名不對稱——圖片是 images（複數）、影片是 video（單數）。已實測路徑。
+fn default_video_endpoint() -> String { "https://apihub.agnes-ai.com/v1/video/generations".to_string() }
 fn default_image_size() -> String { "1024x1024".to_string() }
+fn default_media_timeout() -> u64 { 180 }
 
 impl Default for MultimodalConfig {
     fn default() -> Self {
@@ -133,6 +139,7 @@ impl Default for MultimodalConfig {
             image_endpoint: default_image_endpoint(),
             video_endpoint: default_video_endpoint(),
             default_image_size: default_image_size(),
+            timeout_seconds: default_media_timeout(),
         }
     }
 }

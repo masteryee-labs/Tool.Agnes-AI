@@ -59,30 +59,27 @@ impl MultimodalManager {
     /// 生成圖片（Agnes Image 2.1 Flash）。共用 rate_limiter，計入 20 RPM。
     pub async fn generate_image(
         &self,
-        client: &reqwest::Client,
         limiter: &RateLimiter,
         prompt: &str,
     ) -> Result<MediaResult, String> {
         let payload = build_image_request(&self.cfg.image_model, prompt, &self.cfg.default_image_size);
-        self.post_media(client, limiter, &self.cfg.image_endpoint, &payload, "image")
+        self.post_media(limiter, &self.cfg.image_endpoint, &payload, "image")
             .await
     }
 
     /// 生成影片（Agnes-Video-V2.0）。共用 rate_limiter，計入 20 RPM。
     pub async fn generate_video(
         &self,
-        client: &reqwest::Client,
         limiter: &RateLimiter,
         prompt: &str,
     ) -> Result<MediaResult, String> {
         let payload = build_video_request(&self.cfg.video_model, prompt);
-        self.post_media(client, limiter, &self.cfg.video_endpoint, &payload, "video")
+        self.post_media(limiter, &self.cfg.video_endpoint, &payload, "video")
             .await
     }
 
     async fn post_media(
         &self,
-        client: &reqwest::Client,
         limiter: &RateLimiter,
         endpoint: &str,
         payload: &serde_json::Value,
@@ -91,6 +88,12 @@ impl MultimodalManager {
         if self.api_key.is_empty() {
             return Err("API key 未設定，無法呼叫多模態服務。".to_string());
         }
+        // 媒體生成耗時（實測 Agnes Image 單張 ~50s），用專屬長逾時客戶端，
+        // 不可沿用文字/工具用的 30s 短逾時池，否則必逾時失敗。
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(self.cfg.timeout_seconds))
+            .build()
+            .map_err(|e| format!("無法初始化多模態 HTTP 客戶端: {}", e))?;
         limiter.acquire().await; // 計入全域 20 RPM 令牌桶
         let res = client
             .post(endpoint)
@@ -153,9 +156,8 @@ mod tests {
     #[tokio::test]
     async fn test_empty_key_rejected() {
         let mgr = MultimodalManager::new(MultimodalConfig::default(), String::new());
-        let client = reqwest::Client::new();
         let limiter = RateLimiter::new(20);
-        let r = mgr.generate_image(&client, &limiter, "x").await;
+        let r = mgr.generate_image(&limiter, "x").await;
         assert!(r.is_err());
     }
 }
