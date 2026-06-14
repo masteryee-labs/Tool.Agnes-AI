@@ -14,7 +14,8 @@ Agnes AI 是一套高防禦、極速的桌面 AI 代理人，以 **純 Rust + eg
 - **Claude 相容 Skills** — 在工作區放 `.claude/skills/<名稱>/SKILL.md`，對話輸入 `/名稱` 即可呼叫；`CLAUDE.md` 專案規則自動載入
 - **Claude 相容 MCP** — 工作區根目錄放標準 `.mcp.json`，或在「設定 → MCP 伺服器」新增；已連線伺服器的工具清單自動曝露給模型
 - **分層記憶** — 滑動視窗分塊 + 三階段漏斗 RAG（FTS5 索引），蒸餾水位記號避免重複燒 token
-- **Token 經濟** — Session 級 token 預算硬鎖定，標題列即時顯示用量
+- **速率限制與 20 RPM 防護** — 單一全域共享令牌桶限流器把關每一個 Agnes API 呼叫（含蒸餾與檢索）；`acquire()` 在令牌不足時等待補充而非拒絕，突發流量也不會突破免費方案 20 requests/minute 上限。遇到 429 時客戶端以倍率式指數退避重試。所有參數皆由設定檔驅動（`max_rpm`、退避相關設定）——零 Magic Number
+- **Token 經濟** — Session 級 token 預算硬鎖定，標題列即時顯示用量。請求數由設計面壓低：Stage 0 先做本機 FTS5 記憶查詢，命中即完全跳過檢索 API 呼叫（0 次 API），漏斗 RAG 的 Stage 1+2 已合併為單次呼叫（2 次 → 1 次）
 - **沙盒對齊** — 寫入的 `.rs` 檔案立即編譯（含測試實際執行）；「嘴上說成功但編譯不過」當場退回
 
 ## 安裝與建置
@@ -22,7 +23,7 @@ Agnes AI 是一套高防禦、極速的桌面 AI 代理人，以 **純 Rust + eg
 前置需求：[Rust 工具鏈](https://rustup.rs/)（stable，2021 edition）。
 
 ```powershell
-git clone https://github.com/masteryee-labs/Agnes-AI.git
+git clone https://github.com/masteryee-labs/Tool.Agnes-AI.git
 cd Agnes-AI
 cargo build --release --manifest-path src-tauri/Cargo.toml
 # 啟動 GUI
@@ -92,6 +93,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "C:\\data"]
 - 指令以引數向量執行——不做 shell 字串拼接
 - 路徑圈禁：專案模式下，工作區以外的檔案操作一律拒絕
 - 原始擷取 Exit Code 與 stderr；永不信任模型口頭宣稱的「成功」
+- 全域速率限制器加上 429 指數退避，保護金鑰與帳號免於速率限制鎖定；任何單一子系統（含記憶歸檔）都無法繞過共享的 20 RPM 上限
 
 ## 開發文件
 

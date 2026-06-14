@@ -456,6 +456,32 @@ impl Gate for MultimodalMediaSpecialistGate {
     }
 }
 
+pub struct DestructiveCommandGate;
+impl Gate for DestructiveCommandGate {
+    fn name(&self) -> &'static str { "DestructiveCommand" }
+    fn gate_id(&self) -> &'static str { "D7" }
+    fn check(&self, change: &ProposedChange) -> GateResult {
+        let destructive_patterns = [
+            "FORMAT ", "DISKPART", "PARTITION", "SHUTDOWN /S", "REBOOT /F",
+            "NET USER /DELETE", "NET LOCALGROUP", "ICACLS", "CACLS /T"
+        ];
+        for tc in change.tool_calls {
+            let content_upper = tc.content.to_uppercase();
+            for pattern in &destructive_patterns {
+                if content_upper.contains(pattern) {
+                    return GateResult::Reject {
+                        gate_id: self.gate_id().to_string(),
+                        file: tc.path.clone(),
+                        line: None,
+                        reason: format!("偵測到破壞性指令特徵: '{}'", pattern),
+                    };
+                }
+            }
+        }
+        GateResult::Pass
+    }
+}
+
 fn find_project_root() -> Option<std::path::PathBuf> {
     if let Ok(mut dir) = std::env::current_dir() {
         loop {
@@ -824,6 +850,7 @@ pub fn run_all_gates(
         Box::new(CoreEngineCoderGate),
         Box::new(IntegrationEngineerGate),
         Box::new(MultimodalMediaSpecialistGate),
+        Box::new(DestructiveCommandGate),
     ];
 
     let mut audits = Vec::new();
@@ -903,7 +930,7 @@ mod routing_tests {
         let config = Config::default();
         let messages = chat_messages("你好，介紹一下這個專案", "這是 Agnes AI。");
         let audits = run_all_gates(&config, &[], &messages);
-        assert_eq!(audits.len(), 22);
+        assert_eq!(audits.len(), 23);
         for name in ["MemoryEfficiencyReviewer", "SandboxRuntimeTester",
                      "SecurityComplianceAuditor", "DefensiveCodingSpecialist"] {
             let a = audits.iter().find(|a| a.agent_name == name).unwrap();

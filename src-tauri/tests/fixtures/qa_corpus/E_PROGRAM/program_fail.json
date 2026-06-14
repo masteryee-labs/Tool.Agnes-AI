@@ -1,0 +1,11 @@
+{
+  "expected_verdict": "REJECTED",
+  "failure_code": "G6",
+  "tool_calls": [
+    {
+      "name": "write_file",
+      "path": "Cargo.toml",
+      "content": "webkit-server = \"1.0\""
+    }
+  ]
+}

@@ -19,6 +19,11 @@ memory_tags/
 /render_test/
 /mock_project/
 
+# 多代理人編排執行期暫存（內部 scratch，不入公開倉庫）
+.agents/
+ORIGINAL_REQUEST.md
+PROJECT.md
+
 
 # Added by cargo
 

@@ -94,6 +94,36 @@ pub struct Config {
     pub general: GeneralConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub file_changes: FileChangesConfig,
+    #[serde(default)]
+    pub model_routing: ModelRoutingConfig,
+}
+
+// ─── ModelRoutingConfig ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ModelRoutingConfig {
+    #[serde(default = "default_routing_low")]
+    pub low: String,
+    #[serde(default = "default_routing_main")]
+    pub main: String,
+    #[serde(default = "default_routing_high")]
+    pub high: String,
+}
+
+fn default_routing_low() -> String { "agnes-2.0-flash".to_string() }
+fn default_routing_main() -> String { "agnes-2.0-flash".to_string() }
+fn default_routing_high() -> String { "claude-3-5-sonnet".to_string() }
+
+impl Default for ModelRoutingConfig {
+    fn default() -> Self {
+        Self {
+            low: default_routing_low(),
+            main: default_routing_main(),
+            high: default_routing_high(),
+        }
+    }
 }
 
 // ─── ApiConfig ───────────────────────────────────────────────────────────────
@@ -113,6 +143,21 @@ pub struct ApiConfig {
     pub max_repairs: u32,
     #[serde(default = "default_cost_per_token")]
     pub cost_per_token: f64,
+    /// 每分鐘最大 API 請求數（Agnes-2.0-Flash 免費方案：20 RPM）。0 = 不限速。
+    #[serde(default = "default_max_rpm")]
+    pub max_rpm: u32,
+    /// 429 指數退避初始等待秒數
+    #[serde(default = "default_retry_initial_backoff")]
+    pub retry_initial_backoff_secs: u64,
+    /// 429 指數退避最大等待秒數
+    #[serde(default = "default_retry_max_backoff")]
+    pub retry_max_backoff_secs: u64,
+    /// 429 最大重試次數（用盡後回傳錯誤）
+    #[serde(default = "default_retry_max_attempts")]
+    pub retry_max_attempts: u32,
+    /// 每次退避的倍增因子
+    #[serde(default = "default_retry_backoff_multiplier")]
+    pub retry_backoff_multiplier: f64,
 }
 
 fn default_session_budget() -> u64 { 500000 }
@@ -121,6 +166,11 @@ fn default_model() -> String { "agnes-2.0-flash".to_string() }
 fn default_api_timeout() -> u64 { DEFAULT_API_TIMEOUT_SECS }
 fn default_max_repairs() -> u32 { 3 }
 fn default_cost_per_token() -> f64 { 0.000001 }
+fn default_max_rpm() -> u32 { 20 }
+fn default_retry_initial_backoff() -> u64 { 3 }
+fn default_retry_max_backoff() -> u64 { 60 }
+fn default_retry_max_attempts() -> u32 { 5 }
+fn default_retry_backoff_multiplier() -> f64 { 2.0 }
 
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -132,6 +182,11 @@ impl Default for ApiConfig {
             timeout_seconds: default_api_timeout(),
             max_repairs: default_max_repairs(),
             cost_per_token: default_cost_per_token(),
+            max_rpm: default_max_rpm(),
+            retry_initial_backoff_secs: default_retry_initial_backoff(),
+            retry_max_backoff_secs: default_retry_max_backoff(),
+            retry_max_attempts: default_retry_max_attempts(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
         }
     }
 }
@@ -240,6 +295,38 @@ impl Default for GeneralConfig {
             right_panel_open_default: default_right_panel_open(),
             diff_view_max_lines: default_diff_view_max_lines(),
             file_viewer_max_bytes: default_file_viewer_max_bytes(),
+        }
+    }
+}
+
+// ─── FileChangesConfig ───────────────────────────────────────────────────────
+
+/// 截斷標記：file_changes 單筆內容超過 content_max_bytes 時附加於截斷處。
+pub const FILE_CHANGE_TRUNCATION_MARKER: &str = "\n…[內容已截斷：超過單筆保存上限]";
+
+/// file_changes 表（write_file before/after 全文快照）保留策略。
+/// 無上限時 DB 會隨寫檔次數無界成長，故三道閘：單筆截斷、每對話筆數、刪對話級聯。
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FileChangesConfig {
+    /// 單筆 before/after 內容上限（bytes）。超過則保留前 N bytes（UTF-8 邊界
+    /// 向下對齊）並附 FILE_CHANGE_TRUNCATION_MARKER；存檔長度可能略超出
+    /// 上限（標記本身的長度），上限只約束原文部分。
+    #[serde(default = "default_file_change_content_max_bytes")]
+    pub content_max_bytes: usize,
+    /// 每對話保留的變更筆數上限，超過時刪除最舊（id 最小）。0 = 不保留任何紀錄。
+    #[serde(default = "default_file_change_keep_per_conversation")]
+    pub keep_per_conversation: usize,
+}
+
+/// 與 file_viewer_max_bytes 同量級：500 KB 足以涵蓋正常源碼檔，擋住二進位級大檔。
+fn default_file_change_content_max_bytes() -> usize { 512_000 }
+fn default_file_change_keep_per_conversation() -> usize { 200 }
+
+impl Default for FileChangesConfig {
+    fn default() -> Self {
+        Self {
+            content_max_bytes: default_file_change_content_max_bytes(),
+            keep_per_conversation: default_file_change_keep_per_conversation(),
         }
     }
 }

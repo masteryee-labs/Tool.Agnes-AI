@@ -168,7 +168,15 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             completion_tokens INTEGER NOT NULL,
             total_tokens INTEGER NOT NULL,
             cost_usd REAL NOT NULL,
+            warning_triggered INTEGER NOT NULL DEFAULT 0,
             logged_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS repair_table (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            error_code TEXT NOT NULL,
+            instruction TEXT NOT NULL,
+            repaired_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_index USING fts5(
@@ -212,6 +220,7 @@ pub fn init_db(conn: &Connection) -> Result<()> {
     // 既有資料庫遷移：舊版 conversations 無 project_id 欄。
     // ALTER 對已有該欄的表會失敗——該錯誤即「無需遷移」，安全忽略。
     let _ = conn.execute("ALTER TABLE conversations ADD COLUMN project_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE token_ledger ADD COLUMN warning_triggered INTEGER NOT NULL DEFAULT 0", []);
 
     Ok(())
 }
@@ -556,7 +565,25 @@ fn query_conv_messages(stmt: &mut rusqlite::Statement, conversation_id: &str) ->
 
 // ─── File change tracking（write_file before/after 快照，供 GUI diff 面板）────
 
-/// 記錄一次檔案寫入的 before/after 全文快照。
+/// 超過 max_bytes 時截斷至 UTF-8 字元邊界（向下對齊）並附截斷標記；
+/// 未超過時原樣借用，零拷貝。
+fn truncate_file_change_content(content: &str, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if content.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}{}",
+        &content[..cut],
+        crate::config::FILE_CHANGE_TRUNCATION_MARKER
+    ))
+}
+
+/// 記錄一次檔案寫入的 before/after 快照，並套用保留策略（FileChangesConfig）：
+/// 單筆內容超限截斷、該對話超出筆數上限時刪最舊。
 /// written_at 由 SQLite CURRENT_TIMESTAMP 生成，與其他表的時間戳慣例一致。
 /// 接收 db_path 而非 Connection：呼叫點（agent.rs execute_tool）不持有連線。
 pub fn add_file_change(
@@ -565,12 +592,25 @@ pub fn add_file_change(
     file_path: &str,
     before: &str,
     after: &str,
+    limits: &crate::config::FileChangesConfig,
 ) -> Result<()> {
     let conn = open_connection(db_path)?;
+    let before = truncate_file_change_content(before, limits.content_max_bytes);
+    let after = truncate_file_change_content(after, limits.content_max_bytes);
     conn.execute(
         "INSERT INTO file_changes (conversation_id, file_path, before_content, after_content, written_at) \
          VALUES (?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)",
-        params![conversation_id, file_path, before, after],
+        params![conversation_id, file_path, before.as_ref(), after.as_ref()],
+    )?;
+    // 每對話保留上限：只留 id 最大（最新）的 keep_per_conversation 筆
+    conn.execute(
+        "DELETE FROM file_changes \
+         WHERE conversation_id = ?1 \
+           AND id NOT IN ( \
+               SELECT id FROM file_changes \
+               WHERE conversation_id = ?1 \
+               ORDER BY id DESC LIMIT ?2)",
+        params![conversation_id, limits.keep_per_conversation as i64],
     )?;
     Ok(())
 }
@@ -600,6 +640,16 @@ pub fn get_file_changes(db_path: &Path, conversation_id: &str) -> Result<Vec<Fil
 pub fn delete_conversation(conn: &Connection, conversation_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM conversation_messages WHERE conversation_id = ?1",
+        params![conversation_id],
+    )?;
+    // 級聯清理：file_changes 對話亡則快照亡，否則孤兒列永久佔空間
+    conn.execute(
+        "DELETE FROM file_changes WHERE conversation_id = ?1",
+        params![conversation_id],
+    )?;
+    // 同理級聯 conversation_audits：每對話最多一輪 22 筆審查列，漏刪即成孤兒
+    conn.execute(
+        "DELETE FROM conversation_audits WHERE conversation_id = ?1",
         params![conversation_id],
     )?;
     conn.execute(
@@ -760,6 +810,7 @@ pub fn update_project_name(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_token_log(
     conn: &Connection,
     task_id: Option<&str>,
@@ -768,11 +819,12 @@ pub fn add_token_log(
     completion_tokens: i64,
     total_tokens: i64,
     cost_usd: f64,
+    warning_triggered: i32,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO token_ledger (task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd],
+        "INSERT INTO token_ledger (task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, warning_triggered) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, warning_triggered],
     )?;
     Ok(())
 }
@@ -782,6 +834,7 @@ pub fn add_token_log(
 #[cfg(test)]
 mod file_change_tests {
     use super::*;
+    use crate::config::{FileChangesConfig, FILE_CHANGE_TRUNCATION_MARKER};
     use std::path::PathBuf;
 
     /// 每測試獨立暫存 DB（pid + 奈秒時戳），避免並行測試互踩同一檔案。
@@ -798,11 +851,17 @@ mod file_change_tests {
         ))
     }
 
+    /// 測試專用的小額度保留策略。
+    fn limits(content_max_bytes: usize, keep_per_conversation: usize) -> FileChangesConfig {
+        FileChangesConfig { content_max_bytes, keep_per_conversation }
+    }
+
     #[test]
     fn file_change_roundtrip_ordered_by_id() {
         let db = temp_db("roundtrip");
-        add_file_change(&db, "conv-1", "src/a.rs", "old a", "new a").unwrap();
-        add_file_change(&db, "conv-1", "src/b.rs", "", "fresh file").unwrap();
+        let lim = FileChangesConfig::default();
+        add_file_change(&db, "conv-1", "src/a.rs", "old a", "new a", &lim).unwrap();
+        add_file_change(&db, "conv-1", "src/b.rs", "", "fresh file", &lim).unwrap();
 
         let changes = get_file_changes(&db, "conv-1").unwrap();
         assert_eq!(changes.len(), 2);
@@ -820,11 +879,118 @@ mod file_change_tests {
     #[test]
     fn file_changes_isolated_per_conversation() {
         let db = temp_db("isolated");
-        add_file_change(&db, "conv-a", "x.txt", "1", "2").unwrap();
+        add_file_change(&db, "conv-a", "x.txt", "1", "2", &FileChangesConfig::default()).unwrap();
 
         // 無記錄的對話 → 空集合（非錯誤）
         assert!(get_file_changes(&db, "conv-b").unwrap().is_empty());
         assert_eq!(get_file_changes(&db, "conv-a").unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn oversized_content_truncated_with_marker() {
+        let db = temp_db("truncate");
+        // before 超限（6 > 4）截斷；after 未超限原樣保存
+        add_file_change(&db, "conv-1", "big.txt", "abcdef", "tiny", &limits(4, 10)).unwrap();
+
+        let changes = get_file_changes(&db, "conv-1").unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].before_content,
+            format!("abcd{}", FILE_CHANGE_TRUNCATION_MARKER)
+        );
+        assert_eq!(changes[0].after_content, "tiny");
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn content_at_exact_limit_not_truncated() {
+        let db = temp_db("exact");
+        add_file_change(&db, "conv-1", "x.txt", "abcd", "abcd", &limits(4, 10)).unwrap();
+
+        let changes = get_file_changes(&db, "conv-1").unwrap();
+        assert_eq!(changes[0].before_content, "abcd");
+        assert!(!changes[0].after_content.contains(FILE_CHANGE_TRUNCATION_MARKER));
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn truncation_respects_utf8_boundary() {
+        let db = temp_db("utf8");
+        // 「中文字」共 9 bytes；上限 4 落在第二字中間 → 向下對齊到 3（「中」）
+        add_file_change(&db, "conv-1", "cjk.txt", "中文字", "", &limits(4, 10)).unwrap();
+
+        let changes = get_file_changes(&db, "conv-1").unwrap();
+        assert_eq!(
+            changes[0].before_content,
+            format!("中{}", FILE_CHANGE_TRUNCATION_MARKER)
+        );
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn per_conversation_retention_keeps_newest() {
+        let db = temp_db("retention");
+        let lim = limits(1024, 3);
+        for i in 0..5 {
+            let path = format!("f{}.txt", i);
+            add_file_change(&db, "conv-1", &path, "old", "new", &lim).unwrap();
+        }
+        // 不同對話不受 conv-1 修剪影響
+        add_file_change(&db, "conv-2", "other.txt", "a", "b", &lim).unwrap();
+
+        let changes = get_file_changes(&db, "conv-1").unwrap();
+        assert_eq!(changes.len(), 3);
+        // 留下的必須是最新三筆（f2/f3/f4），最舊兩筆已刪
+        let paths: Vec<&str> = changes.iter().map(|c| c.file_path.as_str()).collect();
+        assert_eq!(paths, vec!["f2.txt", "f3.txt", "f4.txt"]);
+        assert_eq!(get_file_changes(&db, "conv-2").unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn delete_conversation_cascades_file_changes() {
+        let db = temp_db("cascade");
+        let lim = FileChangesConfig::default();
+        add_file_change(&db, "conv-del", "a.txt", "1", "2", &lim).unwrap();
+        add_file_change(&db, "conv-del", "b.txt", "3", "4", &lim).unwrap();
+        add_file_change(&db, "conv-keep", "c.txt", "5", "6", &lim).unwrap();
+
+        let conn = open_connection(&db).unwrap();
+        delete_conversation(&conn, "conv-del").unwrap();
+
+        assert!(get_file_changes(&db, "conv-del").unwrap().is_empty());
+        // 其他對話的快照不受級聯影響
+        assert_eq!(get_file_changes(&db, "conv-keep").unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn delete_conversation_cascades_conversation_audits() {
+        let db = temp_db("cascade_audits");
+        let conn = open_connection(&db).unwrap();
+        let audits = vec![
+            ("G1".to_string(), "[PASS]".to_string(), "ok".to_string()),
+            (
+                "G2".to_string(),
+                "[REJECT: db.rs:1 | 範例".to_string(),
+                "ng".to_string(),
+            ),
+        ];
+        replace_conversation_audits(&conn, "conv-del", &audits).unwrap();
+        replace_conversation_audits(&conn, "conv-keep", &audits).unwrap();
+
+        delete_conversation(&conn, "conv-del").unwrap();
+
+        assert!(get_conversation_audits(&conn, "conv-del").unwrap().is_empty());
+        // 其他對話的審查列不受級聯影響
+        assert_eq!(get_conversation_audits(&conn, "conv-keep").unwrap().len(), 2);
 
         let _ = std::fs::remove_file(&db);
     }
