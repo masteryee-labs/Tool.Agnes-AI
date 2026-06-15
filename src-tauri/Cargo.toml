@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "agnes-ai"
 version = "0.8.1"
 description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
@@ -49,3 +49,7 @@ lto = true
 
 [patch.'https://github.com/emilk/egui']
 # egui = { git = "https://github.com/emilk/egui", branch = "master" }
+
+[build-dependencies]
+winres = "0.1"
+
