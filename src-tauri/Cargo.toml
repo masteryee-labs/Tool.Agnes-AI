@@ -2,7 +2,7 @@
 name = "agnes-ai"
 version = "0.8.1"
 description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
-authors = ["Agnes Team"]
+authors = ["masteryee-labs"]
 edition = "2021"
 
 [lib]
