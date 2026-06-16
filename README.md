@@ -20,7 +20,7 @@ Agnes AI is a high-defense, high-speed desktop AI agent built with **pure Rust +
 
 ## Install & Build
 
-Prerequisites: [Rust toolchain](https://rustup.rs/) (stable, 2021 edition).
+Prerequisites: [Rust toolchain](https://rust-lang.org/) (stable, 2021 edition).
 
 ```powershell
 git clone https://github.com/masteryee-labs/Tool.Agnes-AI.git

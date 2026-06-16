@@ -130,7 +130,7 @@ impl AppState {
         let http_client = Arc::new(Mutex::new(
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
-                .user_agent("Agnes-AI/0.5.0")
+                .user_agent("Agnes-AI/0.8.1")
                 .build()
                 .map_err(|e| format!("Failed to build pooled HTTP client: {}", e))?,
         ));
