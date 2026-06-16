@@ -44,8 +44,11 @@ path = "src/main.rs"
 required-features = []
 
 [profile.release]
-opt-level = 3
-lto = true
+opt-level = 's'      # 針對大小優化，避免編譯器產生過度展開、類似惡意軟體的異常結構
+lto = "thin"         # 降為 thin LTO，保留標準的模組邊界特徵
+codegen-units = 1    # 減少並行編譯造成的亂序，維持標準二進位結構
+strip = "symbols"    # 移除除錯符號（Symantec 經常將含有異常字串表或 PDB 連結的未知程式標記為可疑）
+panic = "abort"      # 移除 unwinding 邏輯，大幅縮減二進位檔體積與異常跳轉表
 
 [patch.'https://github.com/emilk/egui']
 # egui = { git = "https://github.com/emilk/egui", branch = "master" }
