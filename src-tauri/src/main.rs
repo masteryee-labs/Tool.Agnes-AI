@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-//! Agnes AI v0.8.1 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.8.2 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
 mod ui_chat;
@@ -1334,10 +1334,21 @@ impl AgnesApp {
                 } else {
                     egui::RichText::new(format!("📁 {}", p.name)).size(14.0).color(TEXT_PRIMARY)
                 };
+                let mut delete_proj = false;
                 let resp = egui::CollapsingHeader::new(header_text)
                     .id_salt(("project_hdr", p.id.as_str()))
                     .default_open(is_selected)
                     .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("").size(12.0).color(TEXT_SECONDARY));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("🗑 刪除專案").on_hover_text("永久刪除此專案與所有對話").clicked() {
+                                    delete_proj = true;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+
                         self.render_session_rows(ui, st, lang, &p.id, Some(idx));
                         ui.add_space(4.0);
 
@@ -1349,17 +1360,35 @@ impl AgnesApp {
                         .id_salt(("project_folders", p.id.as_str()))
                         .default_open(false)
                         .show(ui, |ui| {
+                            let mut path_to_remove: Option<String> = None;
                             for path in &p.paths {
-                                let mut checked = st.selected_paths.contains(path);
-                                let short = std::path::Path::new(path)
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy().to_string())
-                                    .unwrap_or_else(|| path.clone());
-                                if ui.checkbox(&mut checked, &short).on_hover_text(path).changed() {
-                                    if checked {
-                                        st.selected_paths.insert(path.clone());
-                                    } else {
-                                        st.selected_paths.remove(path);
+                                ui.horizontal(|ui| {
+                                    let mut checked = st.selected_paths.contains(path);
+                                    let short = std::path::Path::new(path)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| path.clone());
+                                    if ui.checkbox(&mut checked, &short).on_hover_text(path).changed() {
+                                        if checked {
+                                            st.selected_paths.insert(path.clone());
+                                        } else {
+                                            st.selected_paths.remove(path);
+                                        }
+                                    }
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.small_button("🗑").clicked() {
+                                            path_to_remove = Some(path.clone());
+                                        }
+                                    });
+                                });
+                            }
+                            if let Some(p_remove) = path_to_remove {
+                                if let Some(proj) = st.projects.get_mut(idx) {
+                                    proj.paths.retain(|x| x != &p_remove);
+                                    st.selected_paths.remove(&p_remove);
+                                    if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                                        let json = serde_json::to_string(&proj.paths).unwrap_or_default();
+                                        let _ = app_lib::update_project_folders(&conn, &proj.id, &json);
                                     }
                                 }
                             }
@@ -1380,6 +1409,24 @@ impl AgnesApp {
                             }
                         });
                     });
+
+                if delete_proj {
+                    if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                        let _ = app_lib::delete_project(&conn, &p.id);
+                    }
+                    st.projects.remove(idx);
+                    if st.selected_project_idx == Some(idx) {
+                        st.selected_project_idx = None;
+                        st.selected_paths.clear();
+                        st.reset_session();
+                    } else if let Some(sel) = st.selected_project_idx {
+                        if sel > idx {
+                            st.selected_project_idx = Some(sel - 1);
+                        }
+                    }
+                    break; // stop iterating as we mutated the list
+                }
+
                 // 點專案名 = 選取該專案（工作區切換）
                 if resp.header_response.clicked() && !is_selected {
                     st.selected_project_idx = Some(idx);
@@ -2340,7 +2387,7 @@ fn main() {
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([800.0, 500.0])
             .with_decorations(true)
-            .with_title("Agnes AI v0.5.0 — Multi Agent Security Engine"),
+            .with_title(format!("Agnes AI v{} — Multi Agent Security Engine", env!("CARGO_PKG_VERSION"))),
         ..Default::default()
     };
 

@@ -417,12 +417,15 @@ fn capture_output(cmd: &mut Command) -> SandboxResult {
 }
 
 /// 根據 shell 類型校準 UTF-8 環境後執行。
-fn run_with_locale(cmd: &mut Command, _shell: &str, full_access: bool) -> SandboxResult {
+fn run_with_locale(cmd: &mut Command, _shell: &str, full_access: bool, workspace: Option<&std::path::PathBuf>) -> SandboxResult {
     let is_windows = cfg!(target_os = "windows");
 
     if !is_windows {
         locale::set_locale_env(cmd, None, None);
-    } else if !full_access {
+    }
+    if let Some(w) = workspace {
+        cmd.current_dir(w);
+    } else if is_windows && !full_access {
         cmd.current_dir(std::env::current_dir().unwrap_or_default());
     }
 
@@ -519,21 +522,21 @@ pub fn run_in_sandbox(
                     locale::prepend_utf8_powershell(&build_powershell_string(program, args));
                 let mut cmd = Command::new("powershell");
                 cmd.arg("-Command").arg(cmd_str);
-                run_with_locale(&mut cmd, "powershell", full_access)
+                run_with_locale(&mut cmd, "powershell", full_access, workspace)
             }
             _ => {
                 // "cmd" 與預設：wrapped 在 cmd 中以確保 chcp 65001（解決中文亂碼）
                 let cmd_str = locale::prepend_utf8_cmd(&build_cmd_string(program, args));
                 let mut cmd = Command::new("cmd");
                 cmd.arg("/C").arg(cmd_str);
-                run_with_locale(&mut cmd, "cmd", full_access)
+                run_with_locale(&mut cmd, "cmd", full_access, workspace)
             }
         }
     } else {
         // Unix/macOS：直接執行，locale 環境變數在 run_with_locale 中設定
         let mut cmd = Command::new(program);
         cmd.args(args);
-        run_with_locale(&mut cmd, "shell", full_access)
+        run_with_locale(&mut cmd, "shell", full_access, workspace)
     }
 }
 

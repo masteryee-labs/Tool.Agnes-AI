@@ -223,6 +223,94 @@ impl AgnesApp {
 
         let audits = st.audit_results.clone();
 
+        // ConfirmationGate (try_lock = synchronous, safe in render loop)
+        // 放在 TopBottomPanel::bottom 中，確保永遠貼齊底部不被 ScrollArea 擠出視窗外
+        let pending_state = self.app_state.pending_state.try_lock().ok().and_then(|g| g.clone());
+
+        if let Some(pending) = pending_state {
+            egui::TopBottomPanel::bottom("pending_gate_panel")
+                .frame(egui::Frame::default().inner_margin(egui::Margin::symmetric(0, 6)))
+                .show_inside(ui, |ui| {
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(t("pending_approval", lang))
+                            .size(FONT_LABEL)
+                            .color(ACCENT_ORANGE)
+                            .strong(),
+                    );
+                    egui::ScrollArea::vertical().id_salt("pending_tools_scroll").max_height(150.0).show(ui, |ui| {
+                        for tool in &pending.pending_tools {
+                            egui::Frame::default()
+                                .fill(BG_CARD)
+                                .corner_radius(RADIUS_BUTTON)
+                                .inner_margin(SPACING_XS + 2.0)
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(&tool.name).size(FONT_SMALL).strong());
+                                    if let Some(ref path) = tool.path {
+                                        ui.label(
+                                            egui::RichText::new(path)
+                                                .size(FONT_CAPTION)
+                                                .color(TEXT_SECONDARY),
+                                        );
+                                    }
+                                });
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("✓ Approve").clicked() {
+                            let app_state = self.app_state.clone();
+                            let ui_state = self.ui_state.clone();
+                            let ctx2 = ctx.clone();
+                            self.app_state.engine_runtime.spawn(async move {
+                                let taken = app_state.pending_state.lock().await.take();
+                                if let Some(p) = taken {
+                                    // 沿用送出當下的工作區——空工作區會讓路徑圈禁失效
+                                    let mut lp = AgentLoop::new(
+                                        app_state.config.lock().unwrap().clone(),
+                                        p.workspace_path.clone(),
+                                    );
+                                    // 審批後補執行的寫檔也要記入 file_changes
+                                    lp.set_conversation_id(&p.conversation_id);
+                                    let mut results = Vec::new();
+                                    for tool in &p.pending_tools {
+                                        results.push(lp.execute_tool(tool, &app_state.mcp_manager).await);
+                                    }
+                                    // 結果入庫 + 顯示於聊天流
+                                    if let Ok(conn) = Connection::open(&app_state.db_path) {
+                                        for r in &results {
+                                            let _ = app_lib::add_conversation_message(
+                                                &conn, &p.conversation_id, "tool", r,
+                                            );
+                                        }
+                                    }
+                                    // 審批執行可能寫檔——同步刷新變更清單
+                                    let changes =
+                                        app_lib::get_file_changes(&app_state.db_path, &p.conversation_id)
+                                            .unwrap_or_default();
+                                    let mut st = ui_state.lock().unwrap();
+                                    for r in results {
+                                        st.active_messages.push(ChatMessage {
+                                            role: "tool".into(),
+                                            content: r,
+                                        });
+                                    }
+                                    st.file_changes = changes;
+                                }
+                                ctx2.request_repaint();
+                            });
+                        }
+                        if ui.button("✕ Reject").clicked() {
+                            // try_lock is safe: if lock held briefly by another task,
+                            // the pending state clears on the next frame instead.
+                            if let Ok(mut lock) = self.app_state.pending_state.try_lock() {
+                                *lock = None;
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Agent List (Takes up the remaining space)
         egui::ScrollArea::vertical().id_salt("agent_scroll").show(ui, |ui| {
             for (g_name, agents) in groups {
                 ui.add_space(SPACING_XS / 2.0);
@@ -264,86 +352,6 @@ impl AgnesApp {
                 ui.add_space(SPACING_XS / 2.0);
             }
         });
-
-        // ConfirmationGate (try_lock = synchronous, safe in render loop)
-        let pending_state = self.app_state.pending_state.try_lock().ok().and_then(|g| g.clone());
-
-        if let Some(pending) = pending_state {
-            ui.separator();
-            ui.label(
-                egui::RichText::new(t("pending_approval", lang))
-                    .size(FONT_LABEL)
-                    .color(ACCENT_ORANGE)
-                    .strong(),
-            );
-            for tool in &pending.pending_tools {
-                egui::Frame::default()
-                    .fill(BG_CARD)
-                    .corner_radius(RADIUS_BUTTON)
-                    .inner_margin(SPACING_XS + 2.0)
-                    .show(ui, |ui| {
-                        ui.label(egui::RichText::new(&tool.name).size(FONT_SMALL).strong());
-                        if let Some(ref path) = tool.path {
-                            ui.label(
-                                egui::RichText::new(path)
-                                    .size(FONT_CAPTION)
-                                    .color(TEXT_SECONDARY),
-                            );
-                        }
-                    });
-            }
-            ui.horizontal(|ui| {
-                if ui.button("✓ Approve").clicked() {
-                    let app_state = self.app_state.clone();
-                    let ui_state = self.ui_state.clone();
-                    let ctx2 = ctx.clone();
-                    self.app_state.engine_runtime.spawn(async move {
-                        let taken = app_state.pending_state.lock().await.take();
-                        if let Some(p) = taken {
-                            // 沿用送出當下的工作區——空工作區會讓路徑圈禁失效
-                            let mut lp = AgentLoop::new(
-                                app_state.config.lock().unwrap().clone(),
-                                p.workspace_path.clone(),
-                            );
-                            // 審批後補執行的寫檔也要記入 file_changes
-                            lp.set_conversation_id(&p.conversation_id);
-                            let mut results = Vec::new();
-                            for tool in &p.pending_tools {
-                                results.push(lp.execute_tool(tool, &app_state.mcp_manager).await);
-                            }
-                            // 結果入庫 + 顯示於聊天流
-                            if let Ok(conn) = Connection::open(&app_state.db_path) {
-                                for r in &results {
-                                    let _ = app_lib::add_conversation_message(
-                                        &conn, &p.conversation_id, "tool", r,
-                                    );
-                                }
-                            }
-                            // 審批執行可能寫檔——同步刷新變更清單
-                            let changes =
-                                app_lib::get_file_changes(&app_state.db_path, &p.conversation_id)
-                                    .unwrap_or_default();
-                            let mut st = ui_state.lock().unwrap();
-                            for r in results {
-                                st.active_messages.push(ChatMessage {
-                                    role: "tool".into(),
-                                    content: r,
-                                });
-                            }
-                            st.file_changes = changes;
-                        }
-                        ctx2.request_repaint();
-                    });
-                }
-                if ui.button("✕ Reject").clicked() {
-                    // try_lock is safe: if lock held briefly by another task,
-                    // the pending state clears on the next frame instead.
-                    if let Ok(mut lock) = self.app_state.pending_state.try_lock() {
-                        *lock = None;
-                    }
-                }
-            });
-        }
     }
 
     /// 變更 Tab：目前 session 的 file_changes 清單；選中後下方顯示 diff/全文視圖。
