@@ -1,6 +1,6 @@
 [package]
 name = "agnes-ai"
-version = "0.8.2"
+version = "0.8.3"
 description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
 authors = ["masteryee-labs"]
 edition = "2021"

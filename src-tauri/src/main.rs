@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-//! Agnes AI v0.8.2 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.8.3 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
 mod ui_chat;
@@ -96,6 +96,8 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("api_key_saved_ok",    ("已儲存 ✓",               "Saved ✓")),
     ("api_key_current",     ("目前金鑰",               "Current key")),
     ("api_key_not_set",     ("尚未設定",               "Not set")),
+    ("base_url",            ("API 端點",               "API Endpoint")),
+    ("base_url_desc",       ("相容於 OpenAI 格式的 API 伺服器位址", "OpenAI-compatible API server URL")),
     ("server_name",         ("名稱",                   "Name")),
     ("command",             ("指令",                   "Command")),
     ("args_hint",           ("引數（空白分隔）",        "Args (space-separated)")),
@@ -145,8 +147,8 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("breadcrumb_new",      ("新對話",                 "New chat")),
     ("recent",              ("最近",                   "Recent")),
     ("toggle_panel",        ("右側面板",               "Right panel")),
-    ("input_hint",          ("輸入訊息…（/ 技能，Ctrl+Enter 送出）",
-                             "Type a message… (/ for skills, Ctrl+Enter to send)")),
+    ("input_hint",          ("輸入訊息…（/ 技能，Enter 送出，Shift+Enter 換行）",
+                             "Type a message… (/ for skills, Enter to send, Shift+Enter for new line)")),
     ("time_just_now",       ("剛剛",                   "just now")),
     ("time_min_ago",        ("{} 分鐘前",              "{} min ago")),
     ("time_hr_ago",         ("{} 小時前",              "{} hr ago")),
@@ -948,6 +950,12 @@ impl AgnesApp {
                     }
                 }) as usize;
 
+                shown += settings_row(ui, &search, &t("base_url", lang), &t("base_url_desc", lang), |ui| {
+                    if ui.add(egui::TextEdit::singleline(&mut cfg.api.base_url).desired_width(280.0)).changed() {
+                        cfg_changed = true;
+                    }
+                }) as usize;
+
                 shown += settings_row(ui, &search, &t("session_budget", lang), &t("session_budget_desc", lang), |ui| {
                     let mut budget = cfg.api.session_budget;
                     if ui.add(egui::DragValue::new(&mut budget).speed(1000)).changed() {
@@ -1171,6 +1179,9 @@ impl AgnesApp {
             let _ = app_lib::delete_conversation(&conn, cid);
             if st.active_conversation_id.as_deref() == Some(cid) {
                 st.reset_session();
+                if let Ok(mut s) = self.app_state.agent_state.try_lock() {
+                    *s = app_lib::AgentExecutionState::Idle;
+                }
             }
             if let Ok(convs) = app_lib::get_conversations(&conn) {
                 st.conversations = convs;
@@ -1471,6 +1482,30 @@ impl AgnesApp {
             .corner_radius(RADIUS_INPUT)
             .inner_margin(SPACING_CARD_INNER)
             .show(ui, |ui| {
+                // 處理輸入事件：必須在 TextEdit 渲染前，否則 TextEdit 會先處理掉 Enter 鍵
+                let mut enter_to_send = false;
+                if !is_running {
+                    ui.input_mut(|i| {
+                        let has_active_ime = i.events.iter().any(|e| match e {
+                            egui::Event::Ime(egui::ImeEvent::Preedit(text)) => !text.is_empty(),
+                            egui::Event::Ime(egui::ImeEvent::Commit(text)) => !text.is_empty(),
+                            _ => false,
+                        });
+                        if has_active_ime {
+                            // 若正在輸入法組字或確認，主動吃掉 Enter 鍵與換行字元，避免 TextEdit 自動插入換行
+                            let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                            i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == "\r" || t == "\n"));
+                        } else {
+                            if i.key_pressed(egui::Key::Enter) && !i.modifiers.shift {
+                                enter_to_send = true;
+                                // 吃掉 Enter 鍵與換行字元，避免 TextEdit 把它當作換行輸入
+                                let _ = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == "\r" || t == "\n"));
+                            }
+                        }
+                    });
+                }
+
                 // 多行輸入區
                 let text_edit = egui::TextEdit::multiline(&mut st.chat_input)
                     .desired_width(f32::INFINITY)
@@ -1587,9 +1622,7 @@ impl AgnesApp {
                             .min_size(egui::Vec2::splat(SEND_BTN_SIZE));
                             let clicked = ui.add(send_btn).clicked();
 
-                            let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let shift_pressed = ui.input(|i| i.modifiers.shift);
-                            if clicked || (enter_pressed && !shift_pressed && response.has_focus()) {
+                            if clicked || (enter_to_send && response.has_focus()) {
                                 if st.chat_input.ends_with('\n') {
                                     st.chat_input.pop();
                                 }
@@ -2267,12 +2300,27 @@ impl eframe::App for AgnesApp {
                 return;
             }
 
-            // ── 對話進行中：訊息流 + 底部輸入卡 ──
-            let avail_height = ui.available_height() - 130.0;
+            // ── 對話進行中：底部輸入卡 + 訊息流 ──
+            let mut send = false;
+            egui::TopBottomPanel::bottom("chat_input_panel")
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| {
+                    ui.add_space(8.0);
+                    let total = ui.available_width();
+                    let inner = total.min(860.0);
+                    let margin = ((total - inner) / 2.0).max(0.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(margin);
+                        ui.vertical(|ui| {
+                            ui.set_width(inner);
+                            send = self.render_input_card(ui, &mut st, is_running, &lang);
+                        });
+                    });
+                    ui.add_space(8.0);
+                });
 
             let mut chat_actions: Vec<ChatAction> = Vec::new();
             egui::ScrollArea::vertical()
-                .max_height(avail_height)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap); // Enable word wrapping globally in scroll area
@@ -2355,21 +2403,6 @@ impl eframe::App for AgnesApp {
                 }
             }
 
-            // 底部釘住輸入卡（Codex / Antigravity 2.0 風格）
-            let mut send = false;
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                ui.add_space(8.0);
-                let total = ui.available_width();
-                let inner = total.min(860.0);
-                let margin = ((total - inner) / 2.0).max(0.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(margin);
-                    ui.vertical(|ui| {
-                        ui.set_width(inner);
-                        send = self.render_input_card(ui, &mut st, is_running, &lang);
-                    });
-                });
-            });
             if send {
                 drop(st);
                 self.handle_send(ctx);

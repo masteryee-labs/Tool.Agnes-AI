@@ -407,7 +407,7 @@ impl AgentLoop {
             return Err("Token budget exceeded! Session budget has been locked.".to_string());
         }
 
-        let api_url = self.config.api.base_url.clone();
+        let api_url = self.config.api.base_url.trim().to_string();
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.config.api.timeout_seconds))
