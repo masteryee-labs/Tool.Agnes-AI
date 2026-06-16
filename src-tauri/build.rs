@@ -13,6 +13,20 @@ fn main() {
         // 從 Cargo.toml 讀取版本號並寫入
         res.set("FileVersion", env!("CARGO_PKG_VERSION"));
         res.set("ProductVersion", env!("CARGO_PKG_VERSION"));
+
+        // 嵌入應用程式 Manifest 以降低防毒軟體 (SmartScreen) 誤判率
+        res.set_manifest(r#"
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+"#);
         
         if let Err(e) = res.compile() {
             eprintln!("Failed to compile Windows resources: {}", e);

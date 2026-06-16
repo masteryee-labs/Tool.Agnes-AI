@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 //! Agnes AI v0.8.1 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
