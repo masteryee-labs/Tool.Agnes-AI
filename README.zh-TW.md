@@ -20,7 +20,7 @@ Agnes AI 是一套高防禦、極速的桌面 AI 代理人，以 **純 Rust + eg
 
 ## 安裝與建置
 
-前置需求：[Rust 工具鏈](https://rustup.rs/)（stable，2021 edition）。
+前置需求：[Rust 工具鏈](https://rust-lang.org/)（stable，2021 edition）。
 
 ```powershell
 git clone https://github.com/masteryee-labs/Tool.Agnes-AI.git

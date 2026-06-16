@@ -1,4 +1,4 @@
-//! Agnes AI v0.6.0 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.8.1 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
 mod ui_chat;
