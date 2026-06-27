@@ -34,7 +34,7 @@
 
 | # | 缺陷 | 嚴重度 | 修復 |
 |---|---|---|---|
-| 1 | 核准語意：`require_approval && !auto_review`——使用者 config 中 require_approval=false（舊設定頁誤存），**核准流程永遠不可達** | 高 | 改為 `!auto_review \|\| 全域模式`（全域一律逐項核准，對齊 confirmation_gate.toon） |
+| 1 | 核准語意：`require_approval && !auto_review`——使用者 config 中 require_approval=false（舊設定頁誤存），**核准流程永遠不可達** | 高 | 改為 `!auto_review \|\| 全域模式`（全域一律逐項核准，對齊 security.toon） |
 | 2 | 核准執行用 `String::new()` 當工作區——**路徑圈禁完全失效**，實測檔案逃逸寫到倉庫根目錄；結果亦未入庫未顯示 | 高（安全） | PendingState 攜帶 workspace_path + conversation_id；核准後沿用原工作區、結果入庫並顯示 |
 | 3 | `vertical_centered + set_max_width + 內層 with_layout` 巢狀使子元件繪製正常但**互動矩形被裁掉**——設定頁 toggle/導航/空狀態送出鈕點擊全部失效 | 高 | 改用樸素 horizontal+vertical 置中與 egui::Sides；toggle/導航改 Button 基底 |
 

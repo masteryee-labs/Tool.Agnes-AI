@@ -2,11 +2,27 @@
 
 > 技術：eframe/egui 0.31 原生渲染。零 Chromium。`ui/` 內的 HTML 原型僅作版面參考，最終以 egui 實作。
 
-## 已實作現況（2026-06-11 第二輪：Claude Desktop 式改版 v0.6.0）
+## 已實作現況（2026-06-27 第三輪：極簡黑+白暗色模式 + 無視窗執行 v0.9.0）
+
+- **配色全面改版**：從 Claude 橘色風格改為極簡黑+白暗色模式（對標 Claude Code / Codex / Devin / Antigravity 2.0 終端美學）
+  - `ACCENT_ORANGE` 由品牌橘 `(217,119,87)` 改為純白 `(235,235,235)`——按鈕、活躍狀態、強調元素
+  - 新增 `TEXT_ON_ACCENT = (18,18,18)`——白色按鈕上的深色文字，確保對比度
+  - 背景層次純黑→深灰漸層：`BG_SIDEBAR=(12,12,12)` → `BG_PRIMARY=(18,18,18)` → `BG_CARD=(28,28,28)` → `BG_TERTIARY=(36,36,36)` → `BG_HOVER=(44,44,44)`
+  - 文字白→灰階：`TEXT_PRIMARY=(235,235,235)` / `TEXT_SECONDARY=(165,165,165)` / `TEXT_MUTED=(100,100,100)`
+  - 狀態色保留但柔和化：綠/紅/黃僅用於狀態徽章，不干擾主視覺
+  - 邊框低對比灰線 `BORDER=(48,48,48)`，讓內容聚焦
+- **無視窗執行（CREATE_NO_WINDOW）**：新增 `no_window.rs` 模組，所有子進程在 Windows 上靜默執行，不再彈出 CMD/PowerShell 視窗
+  - `silent_command()` 函數：建構已注入 `CREATE_NO_WINDOW` flag 的 `std::process::Command`
+  - `NoWindowExt` trait：為既有 `std::process::Command` 注入 flag
+  - `NoWindowExtTokio` trait：為 `tokio::process::Command` 注入 flag（MCP Server 用）
+  - 套用範圍：sandbox.rs（run_command 工具）、agent.rs（rustc 編譯檢查）、loop_engine.rs（cargo test/check）、worktree.rs（git 操作）、validation.rs（clippy/check 閘門）、mcp.rs（MCP Server spawn）、qa_runner.rs（QA 測試）
+- **Phase 5 自主迴圈 UI**：目標模式膠囊切換（💬 對話 / 🎯 目標）、目標輸入卡、迴圈狀態即時更新（500ms poll）、啟動/停止按鈕
+
+## 上一輪現況（2026-06-11 第二輪：Claude Desktop 式改版 v0.6.0）
 
 - **模組拆分**：GUI 由單檔 main.rs 拆出三個 bin 模組——`ui_theme.rs`（全部色彩/圓角/間距/字級具名常數 + `apply_theme`）、`ui_chat.rs`（訊息流渲染）、`ui_panels.rs`（右側三 Tab 面板）；main.rs 淨縮約 1,000 行
 - **頂列麵包屑**：「📁 專案名｜🌍 全域 / Session 標題或新對話」；右叢集：檔案/檢視選單、語言、▤ 右面板開關、Token 預算條、⚙
-- **左側欄**：品牌橘「＋ 新增對話」整寬鈕 → 膠囊 segmented「專案｜全域」（切 Tab 同步 work_mode 與 config）→「最近」目前範疇最新 8 筆 Session（相對時間、hover 🗑）→ 專案摺疊樹/全域列表 → 底部 ⚙ + 模式徽章
+- **左側欄**：白色「＋ 新增對話」整寬鈕 → 膠囊 segmented「專案｜全域」（切 Tab 同步 work_mode 與 config）→「最近」目前範疇最新 8 筆 Session（相對時間、hover 🗑）→ 專案摺疊樹/全域列表 → 底部 ⚙ + 模式徽章
 - **訊息流（Claude Desktop 式）**：
   - user＝整寬淡色卡；assistant＝無氣泡純文字
   - **Think 收闔**：工具標籤前的自由文字 >3 行渲染為「✱ 思考過程（N 行）›」弱色斜體列，預設收闔；`<think>` 標籤同樣處理；最終結論永遠直出
@@ -22,7 +38,7 @@
 
 - **側邊欄 Tab 化**：頂部「📁 專案｜🌍 全域」雙 Tab，切 Tab 即切工作模式（同步寫回 `config.general.project_mode`）
   - 專案 Tab：「＋ 新增專案」直接挑資料夾建專案；每個專案為摺疊節點，底下巢狀該專案的對話 Session（點擊載入續聊、🗑 刪除）與資料夾管理子摺疊
-  - 全域 Tab：橘色說明列 + 全域範疇 Session 清單（`conversations.project_id = 'global'` 哨兵）
+  - 全域 Tab：灰色說明列 + 全域範疇 Session 清單（`conversations.project_id = 'global'` 哨兵）
 - **Session 持久化**：`conversations` 表新增 `project_id` 欄（含舊庫 ALTER 遷移與孤兒補綁）；新 Session 自動掛目前範疇
 - **API 金鑰 UX**：儲存後顯示遮罩金鑰（頭5尾4）+ SHA-256 指紋 + 常駐綠色「已儲存 ✓」
 - **全域字級**：egui text_styles 拉高（Body 16 / Button 15.5 / Mono 14.5 / Small 13），右側代理人面板與各小字同步放大
@@ -70,7 +86,7 @@
 
 ## ConfirmationGate 右側面板
 
-- PendingAction 卡片：描述、目標路徑、風險徽章（Low 灰/Medium 黃/High 橘/Critical 紅）、產生它的代理人
+- PendingAction 卡片：描述、目標路徑、風險徽章（Low 灰/Medium 黃/High 白/Critical 紅）、產生它的代理人
 - 操作：單項 Approve/Reject（Reject 附理由欄）、「全部核准 Low」批次鈕（Medium 以上禁止批次）
 - 執行後卡片轉為結果態：Exit Code、Stderr 摘要（截斷至組態行數）、虛假回報攔截標記
 
