@@ -153,6 +153,32 @@ const TRANSLATIONS: &[(&str, (&str, &str))] = &[
     ("time_min_ago",        ("{} 分鐘前",              "{} min ago")),
     ("time_hr_ago",         ("{} 小時前",              "{} hr ago")),
     ("time_day_ago",        ("{} 天前",                "{} d ago")),
+    // ── Phase 5：自主迴圈模式 ──
+    ("goal_mode",           ("目標模式",               "Goal Mode")),
+    ("chat_mode",           ("對話模式",               "Chat Mode")),
+    ("goal_placeholder",    ("描述你的目標，Agnes 會自主完成…",
+                             "Describe your goal, Agnes will work autonomously…")),
+    ("exit_condition",      ("退出條件",               "Exit Condition")),
+    ("exit_hint",           ("例：cargo test 通過",    "e.g. cargo test passes")),
+    ("start_goal",          ("啟動自主迴圈",           "Start Autonomous Loop")),
+    ("stop_goal",           ("停止迴圈",               "Stop Loop")),
+    ("loop_running",        ("迴圈進行中",             "Loop Running")),
+    ("loop_success",        ("目標達成",               "Goal Achieved")),
+    ("loop_failed",         ("目標失敗",               "Goal Failed")),
+    ("loop_stopped",        ("已停止",                 "Stopped")),
+    ("iteration",           ("迭代",                   "Iteration")),
+    ("phase_discover",      ("探索",                   "Discover")),
+    ("phase_plan",          ("規劃",                   "Plan")),
+    ("phase_execute",       ("執行",                   "Execute")),
+    ("phase_verify",        ("驗證",                   "Verify")),
+    ("phase_iterate",       ("迭代",                   "Iterate")),
+    ("sub_agents",          ("子代理執行",             "Sub-Agent Runs")),
+    ("planner",             ("規劃者",                 "Planner")),
+    ("generator",           ("生成者",                 "Generator")),
+    ("evaluator",           ("評估者",                 "Evaluator")),
+    ("pass",                ("通過",                   "Pass")),
+    ("reject",              ("駁回",                   "Reject")),
+    ("failed",              ("失敗",                   "Failed")),
 ];
 
 fn t_with(key: &str, lang: &str, arg: &str) -> String {
@@ -254,6 +280,17 @@ struct UiState {
     // 檔案唯讀檢視器（點擊當幀讀一次並快取）
     file_viewer_path: Option<String>,
     file_viewer_content: Option<Result<String, String>>,
+    // ── Phase 5：自主迴圈模式 ──
+    /// true = 目標模式（AutonomousLoop），false = 一般對話模式
+    goal_mode: bool,
+    /// 目標輸入框內容
+    goal_input: String,
+    /// 退出條件輸入（例："cargo test 通過"）
+    goal_exit_condition: String,
+    /// 目前活躍的自主迴圈狀態快照（None = 未啟動）
+    loop_state: Option<app_lib::LoopState>,
+    /// 目前活躍的 goal_id（用於中止）
+    active_goal_id: Option<String>,
 }
 
 impl UiState {
@@ -302,6 +339,11 @@ impl Default for UiState {
             diff_full_view: false,
             file_viewer_path: None,
             file_viewer_content: None,
+            goal_mode: false,
+            goal_input: String::new(),
+            goal_exit_condition: String::new(),
+            loop_state: None,
+            active_goal_id: None,
         }
     }
 }
@@ -414,6 +456,9 @@ struct AgnesApp {
     qa_sent:   bool,
     qa_done_frames: u32,
     qa_deadline: Option<std::time::Instant>,
+    /// Phase 5 QA：自動啟動自主迴圈的目標描述
+    qa_goal_send: Option<String>,
+    qa_goal_sent: bool,
 }
 
 /// 載入作業系統 CJK 字型（egui default_fonts 不含中文字形，缺此步全部渲染為方框亂碼）。
@@ -577,6 +622,10 @@ impl AgnesApp {
                 }
                 _ => {}
             }
+            // Phase 5 QA：AGNES_QA_GOAL=1 預設目標模式
+            if std::env::var("AGNES_QA_GOAL").as_deref() == Ok("1") {
+                st.goal_mode = true;
+            }
         }
 
         // 互動 QA 模式：AGNES_QA_SEND=<prompt> 啟動後自動經 handle_send 送出，
@@ -588,9 +637,16 @@ impl AgnesApp {
             app_state.config.lock().unwrap().security.auto_review = true;
         }
 
+        // Phase 5 QA：AGNES_QA_GOAL_SEND=<goal> 自動啟動自主迴圈
+        let qa_goal_send = std::env::var("AGNES_QA_GOAL_SEND").ok().filter(|s| !s.trim().is_empty());
+        if qa_goal_send.is_some() {
+            app_state.config.lock().unwrap().security.auto_review = true;
+        }
+
         Self {
             app_state, ui_state, qa_shot, qa_frames: 0,
             qa_send, qa_sent: false, qa_done_frames: 0, qa_deadline: None,
+            qa_goal_send, qa_goal_sent: false,
         }
     }
 
@@ -600,6 +656,57 @@ impl AgnesApp {
     fn qa_screenshot_hook(&mut self, ctx: &egui::Context) {
         let Some(path) = self.qa_shot.clone() else { return };
         self.qa_frames += 1;
+
+        // Phase 5 QA：自動啟動自主迴圈
+        if let Some(goal) = self.qa_goal_send.clone() {
+            if !self.qa_goal_sent && self.qa_frames >= QA_WARMUP_FRAMES {
+                {
+                    let mut st = self.ui_state.lock().unwrap();
+                    st.goal_mode = true;
+                    st.goal_input = goal.clone();
+                    st.goal_exit_condition = std::env::var("AGNES_QA_GOAL_EXIT")
+                        .unwrap_or_default();
+                }
+                self.handle_start_goal(ctx);
+                self.qa_goal_sent = true;
+                self.qa_deadline = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(QA_SEND_TIMEOUT_SECS),
+                );
+                println!("[QA] goal sent via handle_start_goal, waiting for loop…");
+            }
+            if self.qa_goal_sent {
+                let timed_out = self.qa_deadline
+                    .map(|d| std::time::Instant::now() > d)
+                    .unwrap_or(false);
+                let goal_done = self.ui_state.lock().unwrap().active_goal_id.is_none();
+                if timed_out || (goal_done && self.qa_goal_sent) {
+                    self.qa_done_frames += 1;
+                    if self.qa_done_frames == QA_SETTLE_FRAMES {
+                        if timed_out && !goal_done {
+                            eprintln!("[QA] TIMEOUT waiting for loop — capturing current state");
+                        }
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                    }
+                }
+            }
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::Screenshot { image, .. } = e {
+                        Some(image.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
+            if let Some(img) = shot {
+                let _ = save_color_image_png(&img, &path);
+                println!("[QA] screenshot saved: {}", path.display());
+                self.handle_stop_goal();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
 
         if let Some(prompt) = self.qa_send.clone() {
             if !self.qa_sent && self.qa_frames >= QA_WARMUP_FRAMES {
@@ -1615,7 +1722,7 @@ impl AgnesApp {
                             }
                         } else {
                             let send_btn = egui::Button::new(
-                                egui::RichText::new("↑").color(TEXT_PRIMARY).strong().size(16.0),
+                                egui::RichText::new("↑").color(TEXT_ON_ACCENT).strong().size(16.0),
                             )
                             .fill(ACCENT_ORANGE)
                             .corner_radius(RADIUS_BADGE)
@@ -1906,6 +2013,411 @@ impl AgnesApp {
             ctx_clone.request_repaint();
         });
     }
+
+    /// 渲染自主迴圈狀態面板（Phase 5 視覺化）
+    fn render_loop_status(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) {
+        let goal_running = st.active_goal_id.is_some();
+        let loop_st = st.loop_state.clone();
+
+        egui::Frame::default()
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BORDER))
+            .corner_radius(RADIUS_CARD)
+            .inner_margin(SPACING_CARD_INNER)
+            .show(ui, |ui| {
+                if let Some(ref state) = loop_st {
+                    // 狀態徽章
+                    let (status_icon, status_text, status_color) = match state.status {
+                        app_lib::LoopStatus::Running => ("🔄", t("loop_running", lang), ACCENT_BLUE),
+                        app_lib::LoopStatus::Success => ("✓", t("loop_success", lang), ACCENT_GREEN),
+                        app_lib::LoopStatus::Failed => ("✗", t("loop_failed", lang), ACCENT_RED),
+                        app_lib::LoopStatus::Stopped => ("⏹", t("loop_stopped", lang), TEXT_SECONDARY),
+                    };
+
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(status_icon).size(16.0));
+                        ui.label(
+                            egui::RichText::new(status_text)
+                                .size(FONT_SMALL)
+                                .color(status_color)
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} {}/{}",
+                                    t("iteration", lang),
+                                    state.iteration,
+                                    state.max_iterations
+                                ))
+                                .size(FONT_CAPTION)
+                                .color(TEXT_SECONDARY),
+                            );
+                        });
+                    });
+
+                    ui.add_space(SPACING_XS);
+
+                    // 階段進度條（5 階段）
+                    let phases = [
+                        app_lib::LoopPhase::Discover,
+                        app_lib::LoopPhase::Plan,
+                        app_lib::LoopPhase::Execute,
+                        app_lib::LoopPhase::Verify,
+                        app_lib::LoopPhase::Iterate,
+                    ];
+                    ui.horizontal(|ui| {
+                        for phase in &phases {
+                            let is_current = state.current_phase == *phase;
+                            let (bg, fg) = if is_current {
+                                (ACCENT_ORANGE, TEXT_PRIMARY)
+                            } else {
+                                (BG_TERTIARY, TEXT_MUTED)
+                            };
+                            egui::Frame::default()
+                                .fill(bg)
+                                .corner_radius(RADIUS_BADGE)
+                                .inner_margin(egui::Margin::symmetric(8, 3))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{} {}",
+                                            phase.icon(),
+                                            match phase {
+                                                app_lib::LoopPhase::Discover => t("phase_discover", lang),
+                                                app_lib::LoopPhase::Plan => t("phase_plan", lang),
+                                                app_lib::LoopPhase::Execute => t("phase_execute", lang),
+                                                app_lib::LoopPhase::Verify => t("phase_verify", lang),
+                                                app_lib::LoopPhase::Iterate => t("phase_iterate", lang),
+                                            }
+                                        ))
+                                        .size(FONT_CAPTION)
+                                        .color(fg)
+                                        .strong(),
+                                    );
+                                });
+                            ui.add_space(SPACING_XS);
+                        }
+                    });
+
+                    ui.add_space(SPACING_XS);
+
+                    // Token 消耗進度條
+                    let budget_ratio = if state.budget_limit > 0 {
+                        state.total_tokens as f32 / state.budget_limit as f32
+                    } else {
+                        0.0
+                    };
+                    let bar_color = if budget_ratio > 0.8 {
+                        ACCENT_RED
+                    } else if budget_ratio > 0.5 {
+                        ACCENT_YELLOW
+                    } else {
+                        ACCENT_GREEN
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Token: {}/{}",
+                                state.total_tokens, state.budget_limit
+                            ))
+                            .size(FONT_CAPTION)
+                            .color(TEXT_SECONDARY),
+                        );
+                        let bar_width = ui.available_width() - 10.0;
+                        egui::Frame::default()
+                            .fill(BG_TERTIARY)
+                            .corner_radius(RADIUS_BADGE)
+                            .show(ui, |ui| {
+                                let filled = (bar_width * budget_ratio.min(1.0)).max(2.0);
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(filled, 10.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().rect_filled(
+                                    rect,
+                                    0.0,
+                                    bar_color,
+                                );
+                            });
+                    });
+
+                    // 子代理執行摘要
+                    if !state.sub_agent_runs.is_empty() {
+                        ui.add_space(SPACING_XS);
+                        ui.separator();
+                        ui.add_space(SPACING_XS);
+                        ui.label(
+                            egui::RichText::new(format!("🤖 {}", t("sub_agents", lang)))
+                                .size(FONT_SMALL)
+                                .color(TEXT_SECONDARY)
+                                .strong(),
+                        );
+                        ui.add_space(SPACING_XS);
+                        egui::ScrollArea::vertical()
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                for run in &state.sub_agent_runs {
+                                    let (icon, color) = match run.status.as_str() {
+                                        "PASS" => ("✓", ACCENT_GREEN),
+                                        "REJECT" => ("↻", ACCENT_YELLOW),
+                                        "FAILED" => ("✗", ACCENT_RED),
+                                        _ => ("•", TEXT_MUTED),
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(icon).size(13.0).color(color));
+                                        ui.label(
+                                            egui::RichText::new(&run.summary)
+                                                .size(FONT_CAPTION)
+                                                .color(TEXT_SECONDARY),
+                                        );
+                                    });
+                                }
+                            });
+                    }
+
+                    // 最後錯誤
+                    if let Some(ref err) = state.last_error {
+                        ui.add_space(SPACING_XS);
+                        ui.label(
+                            egui::RichText::new(format!("⚠ {}", err))
+                                .size(FONT_CAPTION)
+                                .color(ACCENT_RED),
+                        );
+                    }
+                } else if goal_running {
+                    ui.label(
+                        egui::RichText::new(format!("🔄 {}…", t("loop_running", lang)))
+                            .size(FONT_SMALL)
+                            .color(ACCENT_BLUE),
+                    );
+                }
+
+                // 停止按鈕
+                if goal_running {
+                    ui.add_space(SPACING_XS);
+                    ui.horizontal(|ui| {
+                        if ui.add(
+                            egui::Button::new(
+                                egui::RichText::new(format!("⏹ {}", t("stop_goal", lang)))
+                                    .color(TEXT_PRIMARY)
+                                    .size(FONT_SMALL),
+                            )
+                            .fill(ACCENT_RED)
+                            .corner_radius(RADIUS_BUTTON),
+                        ).clicked() {
+                            self.handle_stop_goal();
+                        }
+                    });
+                }
+            });
+        ui.add_space(SPACING_SM);
+    }
+
+    /// 渲染目標輸入卡（Phase 5 目標模式）
+    fn render_goal_input_card(&self, ui: &mut egui::Ui, st: &mut UiState, lang: &str) -> bool {
+        let mut start = false;
+        let goal_running = st.active_goal_id.is_some();
+
+        egui::Frame::default()
+            .fill(BG_CARD)
+            .stroke(egui::Stroke::new(1.0, BORDER))
+            .corner_radius(RADIUS_INPUT)
+            .inner_margin(SPACING_CARD_INNER)
+            .show(ui, |ui| {
+                // 目標輸入
+                let text_edit = egui::TextEdit::multiline(&mut st.goal_input)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(3)
+                    .hint_text(t("goal_placeholder", lang))
+                    .interactive(!goal_running)
+                    .frame(false);
+                ui.add(text_edit);
+
+                ui.add_space(SPACING_SM);
+
+                // 退出條件輸入
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{}:", t("exit_condition", lang)))
+                            .size(FONT_SMALL)
+                            .color(TEXT_SECONDARY),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut st.goal_exit_condition)
+                            .hint_text(t("exit_hint", lang))
+                            .desired_width(f32::INFINITY)
+                            .interactive(!goal_running)
+                            .frame(false),
+                    );
+                });
+
+                ui.add_space(SPACING_SM);
+
+                // 工具列 + 啟動按鈕
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if goal_running {
+                            ui.add_enabled(
+                                false,
+                                egui::Button::new(
+                                    egui::RichText::new(format!("🔄 {}…", t("loop_running", lang)))
+                                        .color(TEXT_SECONDARY)
+                                        .size(FONT_SMALL),
+                                )
+                                .fill(BG_TERTIARY)
+                                .corner_radius(RADIUS_BUTTON),
+                            );
+                        } else {
+                            let btn = egui::Button::new(
+                                egui::RichText::new(format!("🎯 {}", t("start_goal", lang)))
+                                    .color(TEXT_ON_ACCENT)
+                                    .strong()
+                                    .size(FONT_SMALL),
+                            )
+                            .fill(ACCENT_ORANGE)
+                            .corner_radius(RADIUS_BUTTON);
+                            if ui.add(btn).clicked() {
+                                start = true;
+                            }
+                        }
+                    });
+                });
+            });
+        start
+    }
+
+    /// 啟動自主迴圈（Phase 5）：目標驅動 Discover→Plan→Execute→Verify→Iterate
+    fn handle_start_goal(&self, ctx: &egui::Context) {
+        let (goal, exit_condition, config, workspace_path) = {
+            let mut st = self.ui_state.lock().unwrap();
+            let goal = st.goal_input.clone();
+            if goal.trim().is_empty() { return; }
+            let exit = if st.goal_exit_condition.trim().is_empty() {
+                "所有子任務通過 Evaluator".to_string()
+            } else {
+                st.goal_exit_condition.clone()
+            };
+            st.goal_input.clear();
+
+            let workspace = std::env::var("AGNES_QA_WORKSPACE")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    st.selected_project_idx
+                        .and_then(|i| st.projects.get(i))
+                        .and_then(|p| {
+                            p.paths.iter()
+                                .find(|path| st.selected_paths.contains(*path))
+                                .cloned()
+                                .or_else(|| p.paths.first().cloned())
+                        })
+                        .unwrap_or_else(|| {
+                            std::env::current_dir()
+                                .map(|d| d.to_string_lossy().to_string())
+                                .unwrap_or_default()
+                        })
+                });
+
+            (goal, exit, self.app_state.config.clone(), workspace)
+        };
+
+        let app_state = self.app_state.clone();
+        let app_state_task = self.app_state.clone();
+        let ui_state = self.ui_state.clone();
+        let ctx_clone = ctx.clone();
+
+        app_state.engine_runtime.spawn(async move {
+            // 建立 goal 記錄
+            let goal_id = if let Ok(conn) = Connection::open(&app_state_task.db_path) {
+                let max_iter = config.lock().unwrap().loop_engine.max_iterations;
+                app_lib::create_goal(&conn, &goal, &exit_condition, max_iter)
+                    .unwrap_or_default()
+            } else {
+                return;
+            };
+
+            // 更新 UI 狀態
+            {
+                let mut st = ui_state.lock().unwrap();
+                st.active_goal_id = Some(goal_id.clone());
+                st.status_message = format!("自主迴圈已啟動：{}", goal);
+            }
+
+            // 建構 AutonomousLoop
+            let loop_engine = app_lib::AutonomousLoop::new(
+                config.lock().unwrap().clone(),
+                std::path::PathBuf::from(&workspace_path),
+                app_state_task.rate_limiter.clone(),
+                goal_id.clone(),
+                goal.clone(),
+            );
+
+            // 複製 state Arc 供即時更新 UI
+            let loop_state_arc = loop_engine.state.clone();
+            let loop_state_poll = loop_engine.state.clone();
+            let ui_state_poll = ui_state.clone();
+            let ctx_poll = ctx_clone.clone();
+
+            // 啟動一個即時更新任務：每 500ms 從 loop_state 拉取最新狀態推到 UI
+            let poll_handle = app_state_task.engine_runtime.spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let snapshot = loop_state_poll.lock().await.clone();
+                    {
+                        let mut st = ui_state_poll.lock().unwrap();
+                        if st.active_goal_id.is_some() {
+                            st.loop_state = Some(snapshot);
+                        } else {
+                            break; // 迴圈已結束
+                        }
+                    }
+                    ctx_poll.request_repaint();
+                }
+            });
+
+            // 啟動迴圈
+            let result = loop_engine
+                .run(
+                    &goal,
+                    &exit_condition,
+                    &app_state_task.mcp_manager,
+                    &app_state_task.token_budgeter,
+                    &app_state_task.db_path,
+                )
+                .await;
+
+            // 停止 poll 任務
+            poll_handle.abort();
+
+            // 更新 UI 最終狀態
+            {
+                let final_state = loop_state_arc.lock().await.clone();
+                let mut st = ui_state.lock().unwrap();
+                st.loop_state = Some(final_state);
+                st.active_goal_id = None;
+                st.status_message = match result {
+                    Ok(app_lib::LoopStatus::Success) => format!("✓ 目標達成：{}", goal),
+                    Ok(app_lib::LoopStatus::Failed) => format!("✗ 目標失敗：{}", goal),
+                    Ok(app_lib::LoopStatus::Stopped) => "迴圈已停止".to_string(),
+                    Ok(app_lib::LoopStatus::Running) => "迴圈仍在進行".to_string(),
+                    Err(e) => format!("迴圈錯誤：{}", e),
+                };
+            }
+            ctx_clone.request_repaint();
+        });
+    }
+
+    /// 停止自主迴圈
+    fn handle_stop_goal(&self) {
+        if let Some(ref goal_id) = self.ui_state.lock().unwrap().active_goal_id {
+            if let Ok(conn) = Connection::open(&self.app_state.db_path) {
+                let _ = app_lib::update_goal_status(&conn, goal_id, app_lib::GOAL_STATUS_FAILED);
+            }
+        }
+        self.ui_state.lock().unwrap().active_goal_id = None;
+        self.ui_state.lock().unwrap().status_message = "迴圈已由使用者停止".to_string();
+    }
 }
 
 impl eframe::App for AgnesApp {
@@ -2115,10 +2627,10 @@ impl eframe::App for AgnesApp {
                 let mut st = self.ui_state.lock().unwrap();
                 ui.add_space(SPACING_XS);
 
-                // ＋ 新對話：整寬品牌橘按鈕（在目前範疇下開新 Session）
+                // ＋ 新對話：整寬白色按鈕（在目前範疇下開新 Session）
                 let new_conv_btn = egui::Button::new(
                     egui::RichText::new(format!("＋  {}", t("new_conversation", &lang)))
-                        .size(14.0).color(TEXT_PRIMARY).strong(),
+                        .size(14.0).color(TEXT_ON_ACCENT).strong(),
                 )
                 .fill(ACCENT_ORANGE)
                 .corner_radius(RADIUS_BUTTON)
@@ -2250,8 +2762,61 @@ impl eframe::App for AgnesApp {
 
             // Status bar (error / info)
             if !st.status_message.is_empty() {
-                ui.label(egui::RichText::new(&st.status_message).size(13.0).color(ACCENT_RED));
+                let color = if st.status_message.starts_with("✓") {
+                    ACCENT_GREEN
+                } else {
+                    ACCENT_RED
+                };
+                ui.label(egui::RichText::new(&st.status_message).size(13.0).color(color));
                 ui.add_space(4.0);
+            }
+
+            // ── Phase 5：模式切換膠囊（對話模式 | 目標模式）──
+            let is_running = self.app_state.agent_state.try_lock()
+                .map(|s| matches!(*s, AgentExecutionState::Running(_)))
+                .unwrap_or(false);
+            let goal_running = st.active_goal_id.is_some();
+            {
+                let mut switch_to: Option<bool> = None;
+                ui.horizontal(|ui| {
+                    egui::Frame::default()
+                        .fill(BG_CARD)
+                        .corner_radius(RADIUS_BADGE)
+                        .inner_margin(egui::Margin::same(3))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.x = SPACING_XS;
+                            let half = 110.0;
+                            let tabs = [
+                                (false, "💬", "chat_mode"),
+                                (true, "🎯", "goal_mode"),
+                            ];
+                            for (tab_goal, icon, key) in tabs {
+                                let active = st.goal_mode == tab_goal;
+                                let (fill, text_color) = if active {
+                                    (BG_HOVER, TEXT_PRIMARY)
+                                } else {
+                                    (egui::Color32::TRANSPARENT, TEXT_SECONDARY)
+                                };
+                                if ui.add_sized(
+                                    egui::vec2(half, SEGMENT_HEIGHT),
+                                    egui::Button::new(
+                                        egui::RichText::new(format!("{} {}", icon, t(key, &lang)))
+                                            .size(FONT_SMALL).color(text_color).strong(),
+                                    ).fill(fill).corner_radius(RADIUS_BADGE),
+                                ).clicked() && !active && !is_running && !goal_running {
+                                    switch_to = Some(tab_goal);
+                                }
+                            }
+                        });
+                });
+                if let Some(to_goal) = switch_to {
+                    st.goal_mode = to_goal;
+                }
+            }
+
+            // ── 自主迴圈狀態面板（目標模式 + 有活躍迴圈時顯示）──
+            if st.goal_mode && (goal_running || st.loop_state.is_some()) {
+                self.render_loop_status(ui, &mut st, &lang);
             }
 
             // ── Codex 風格空狀態：置中大標題提問 + 置中輸入卡 ──
@@ -2282,6 +2847,7 @@ impl eframe::App for AgnesApp {
                 });
                 ui.add_space(28.0);
                 let mut send = false;
+                let mut start_goal = false;
                 // 樸素置中（vertical_centered+set_max_width 巢狀會吃掉子元件點擊）
                 let total = ui.available_width();
                 let inner = total.min(760.0);
@@ -2290,12 +2856,21 @@ impl eframe::App for AgnesApp {
                     ui.add_space(margin);
                     ui.vertical(|ui| {
                         ui.set_width(inner);
-                        send = self.render_input_card(ui, &mut st, is_running, &lang);
+                        if st.goal_mode {
+                            start_goal = self.render_goal_input_card(ui, &mut st, &lang);
+                        } else {
+                            send = self.render_input_card(ui, &mut st, is_running, &lang);
+                        }
                     });
                 });
-                if send {
+                if send || start_goal {
+                    let is_goal = start_goal;
                     drop(st);
-                    self.handle_send(ctx);
+                    if is_goal {
+                        self.handle_start_goal(ctx);
+                    } else {
+                        self.handle_send(ctx);
+                    }
                 }
                 return;
             }
@@ -2313,7 +2888,11 @@ impl eframe::App for AgnesApp {
                         ui.add_space(margin);
                         ui.vertical(|ui| {
                             ui.set_width(inner);
-                            send = self.render_input_card(ui, &mut st, is_running, &lang);
+                            if st.goal_mode {
+                                send = self.render_goal_input_card(ui, &mut st, &lang);
+                            } else {
+                                send = self.render_input_card(ui, &mut st, is_running, &lang);
+                            }
                         });
                     });
                     ui.add_space(8.0);
@@ -2404,8 +2983,13 @@ impl eframe::App for AgnesApp {
             }
 
             if send {
+                let is_goal = st.goal_mode;
                 drop(st);
-                self.handle_send(ctx);
+                if is_goal {
+                    self.handle_start_goal(ctx);
+                } else {
+                    self.handle_send(ctx);
+                }
             }
         });
 
