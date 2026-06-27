@@ -1,41 +1,52 @@
-//! 主題層：Claude Desktop 深色版的色彩、圓角、間距與字級。
+//! 主題層：極簡黑+白暗色模式的色彩、圓角、間距與字級。
 //! 所有 UI 模組一律引用此處具名常數；新數值禁止在 UI 代碼裸寫。
+//!
+//! 設計理念：對標 Claude Code / Codex / Devin / Antigravity 2.0 的暗色終端美學——
+//! 純黑底 + 白字 + 灰階層次，無品牌色干擾，讓使用者聚焦於內容本身。
 
 use eframe::egui;
 
-// ─── 背景層次 ────────────────────────────────────────────────────────────────
-/// 視窗 / 中央內容區
-pub const BG_PRIMARY: egui::Color32 = egui::Color32::from_rgb(22, 22, 21);
-/// 側欄（左側欄 / 右面板 / 頂列）
-pub const BG_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(16, 16, 15);
+// ─── 背景層次（純黑→深灰漸層）─────────────────────────────────────────────────
+/// 視窗 / 中央內容區（最深黑）
+pub const BG_PRIMARY: egui::Color32 = egui::Color32::from_rgb(18, 18, 18);
+/// 側欄（左側欄 / 右面板 / 頂列）（比主背景暗一階，幾乎純黑）
+pub const BG_SIDEBAR: egui::Color32 = egui::Color32::from_rgb(12, 12, 12);
 /// 卡片（訊息卡 / 設定列 / 輸入卡）
-pub const BG_CARD: egui::Color32 = egui::Color32::from_rgb(33, 33, 32);
+pub const BG_CARD: egui::Color32 = egui::Color32::from_rgb(28, 28, 28);
 /// 輸入欄位 / user 訊息卡（比卡片再亮一階）
-pub const BG_TERTIARY: egui::Color32 = egui::Color32::from_rgb(40, 40, 38);
+pub const BG_TERTIARY: egui::Color32 = egui::Color32::from_rgb(36, 36, 36);
 /// hover 高亮
-pub const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(45, 45, 44);
+pub const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(44, 44, 44);
 /// 碼塊 / 工具輸出底（比卡片暗一階）
-pub const BG_CODE: egui::Color32 = egui::Color32::from_rgb(26, 26, 25);
-/// 邊框
-pub const BORDER: egui::Color32 = egui::Color32::from_rgb(58, 58, 56);
+pub const BG_CODE: egui::Color32 = egui::Color32::from_rgb(22, 22, 22);
+/// 邊框（低對比灰線）
+pub const BORDER: egui::Color32 = egui::Color32::from_rgb(48, 48, 48);
 
-// ─── 文字 ────────────────────────────────────────────────────────────────────
-pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(232, 230, 225);
-pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(160, 158, 152);
-pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(110, 108, 102);
+// ─── 文字（白→灰階）──────────────────────────────────────────────────────────
+/// 主文字（近白）
+pub const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(235, 235, 235);
+/// 次要文字（中灰）
+pub const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(165, 165, 165);
+/// 弱化文字（深灰）
+pub const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(100, 100, 100);
+/// 強調色背景上的文字（純黑——用於白色按鈕上）
+pub const TEXT_ON_ACCENT: egui::Color32 = egui::Color32::from_rgb(18, 18, 18);
 
-// ─── 強調色 ──────────────────────────────────────────────────────────────────
-/// 品牌橘（Claude 風主強調）
-pub const ACCENT_ORANGE: egui::Color32 = egui::Color32::from_rgb(217, 119, 87);
-/// 連結 / 選取藍
-pub const ACCENT_BLUE: egui::Color32 = egui::Color32::from_rgb(102, 153, 255);
-pub const ACCENT_GREEN: egui::Color32 = egui::Color32::from_rgb(94, 190, 125);
-pub const ACCENT_RED: egui::Color32 = egui::Color32::from_rgb(235, 90, 90);
-pub const ACCENT_YELLOW: egui::Color32 = egui::Color32::from_rgb(240, 200, 80);
+// ─── 強調色（極簡：白為主強調，灰階輔助）─────────────────────────────────────
+/// 主強調色：純白（按鈕、活躍狀態、送出鍵）
+pub const ACCENT_ORANGE: egui::Color32 = egui::Color32::from_rgb(235, 235, 235);
+/// 連結 / 選取（淺灰藍，低調）
+pub const ACCENT_BLUE: egui::Color32 = egui::Color32::from_rgb(130, 170, 255);
+/// 成功（柔和綠，僅用於狀態徽章）
+pub const ACCENT_GREEN: egui::Color32 = egui::Color32::from_rgb(100, 200, 120);
+/// 錯誤（柔和紅，僅用於錯誤狀態）
+pub const ACCENT_RED: egui::Color32 = egui::Color32::from_rgb(220, 100, 100);
+/// 警告（柔和黃，僅用於警告狀態）
+pub const ACCENT_YELLOW: egui::Color32 = egui::Color32::from_rgb(220, 190, 90);
 
 // ─── Diff 行底色 ─────────────────────────────────────────────────────────────
-pub const DIFF_ADDED_BG: egui::Color32 = egui::Color32::from_rgb(28, 52, 36);
-pub const DIFF_REMOVED_BG: egui::Color32 = egui::Color32::from_rgb(58, 30, 30);
+pub const DIFF_ADDED_BG: egui::Color32 = egui::Color32::from_rgb(26, 48, 32);
+pub const DIFF_REMOVED_BG: egui::Color32 = egui::Color32::from_rgb(52, 28, 28);
 
 // ─── 圓角 ────────────────────────────────────────────────────────────────────
 pub const RADIUS_CARD: u8 = 10;
