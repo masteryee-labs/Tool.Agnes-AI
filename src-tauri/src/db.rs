@@ -200,6 +200,30 @@ pub fn init_db(conn: &Connection) -> Result<()> {
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS goals (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            exit_condition TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            iteration INTEGER NOT NULL DEFAULT 0,
+            max_iterations INTEGER NOT NULL DEFAULT 10,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME
+        );
+
+        CREATE TABLE IF NOT EXISTS sub_agent_runs (
+            id TEXT PRIMARY KEY,
+            goal_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            result_summary TEXT NOT NULL DEFAULT '',
+            worktree_path TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME,
+            FOREIGN KEY(goal_id) REFERENCES goals(id)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_execution_logs_task
             ON execution_logs(task_id);
 
@@ -214,6 +238,9 @@ pub fn init_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_file_changes_conv
             ON file_changes(conversation_id);
+
+        CREATE INDEX IF NOT EXISTS idx_sub_agent_runs_goal
+            ON sub_agent_runs(goal_id);
         ",
     )?;
 
@@ -827,6 +854,166 @@ pub fn add_token_log(
         params![task_id, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, warning_triggered],
     )?;
     Ok(())
+}
+
+// ─── Goals CRUD（Phase 5 自主迴圈）────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Goal {
+    pub id: String,
+    pub description: String,
+    pub exit_condition: String,
+    pub status: String,
+    pub iteration: i64,
+    pub max_iterations: i64,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+pub const GOAL_STATUS_PENDING: &str = "PENDING";
+pub const GOAL_STATUS_RUNNING: &str = "RUNNING";
+pub const GOAL_STATUS_SUCCESS: &str = "SUCCESS";
+pub const GOAL_STATUS_FAILED: &str = "FAILED";
+
+pub fn create_goal(
+    conn: &Connection,
+    description: &str,
+    exit_condition: &str,
+    max_iterations: i64,
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO goals (id, description, exit_condition, status, max_iterations) \
+         VALUES (?1, ?2, ?3, 'PENDING', ?4)",
+        params![id, description, exit_condition, max_iterations],
+    )?;
+    Ok(id)
+}
+
+pub fn update_goal_status(conn: &Connection, goal_id: &str, status: &str) -> Result<()> {
+    let completed = if status == GOAL_STATUS_SUCCESS || status == GOAL_STATUS_FAILED {
+        "CURRENT_TIMESTAMP"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "UPDATE goals SET status = ?1, completed_at = {} WHERE id = ?2",
+        completed
+    );
+    conn.execute(&sql, params![status, goal_id])?;
+    Ok(())
+}
+
+pub fn increment_goal_iteration(conn: &Connection, goal_id: &str) -> Result<i64> {
+    conn.execute(
+        "UPDATE goals SET iteration = iteration + 1 WHERE id = ?1",
+        params![goal_id],
+    )?;
+    conn.query_row(
+        "SELECT iteration FROM goals WHERE id = ?1",
+        params![goal_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn get_goal(conn: &Connection, goal_id: &str) -> Result<Goal> {
+    conn.query_row(
+        "SELECT id, description, exit_condition, status, iteration, max_iterations, created_at, completed_at \
+         FROM goals WHERE id = ?1",
+        params![goal_id],
+        |row| {
+            Ok(Goal {
+                id: row.get(0)?,
+                description: row.get(1)?,
+                exit_condition: row.get(2)?,
+                status: row.get(3)?,
+                iteration: row.get(4)?,
+                max_iterations: row.get(5)?,
+                created_at: row.get(6)?,
+                completed_at: row.get(7)?,
+            })
+        },
+    )
+}
+
+// ─── Sub-agent runs CRUD（Phase 5 真子代理執行記錄）────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubAgentRun {
+    pub id: String,
+    pub goal_id: String,
+    pub role: String,
+    pub conversation_id: String,
+    pub status: String,
+    pub result_summary: String,
+    pub worktree_path: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+pub const SUB_AGENT_STATUS_PENDING: &str = "PENDING";
+pub const SUB_AGENT_STATUS_RUNNING: &str = "RUNNING";
+pub const SUB_AGENT_STATUS_PASS: &str = "PASS";
+pub const SUB_AGENT_STATUS_REJECT: &str = "REJECT";
+pub const SUB_AGENT_STATUS_FAILED: &str = "FAILED";
+
+pub fn create_sub_agent_run(
+    conn: &Connection,
+    goal_id: &str,
+    role: &str,
+    conversation_id: &str,
+    worktree_path: Option<&str>,
+) -> Result<String> {
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO sub_agent_runs (id, goal_id, role, conversation_id, status, worktree_path) \
+         VALUES (?1, ?2, ?3, ?4, 'PENDING', ?5)",
+        params![id, goal_id, role, conversation_id, worktree_path],
+    )?;
+    Ok(id)
+}
+
+pub fn update_sub_agent_run(
+    conn: &Connection,
+    run_id: &str,
+    status: &str,
+    result_summary: &str,
+) -> Result<()> {
+    let completed = if status == SUB_AGENT_STATUS_PASS
+        || status == SUB_AGENT_STATUS_REJECT
+        || status == SUB_AGENT_STATUS_FAILED
+    {
+        "CURRENT_TIMESTAMP"
+    } else {
+        "NULL"
+    };
+    let sql = format!(
+        "UPDATE sub_agent_runs SET status = ?1, result_summary = ?2, completed_at = {} WHERE id = ?3",
+        completed
+    );
+    conn.execute(&sql, params![status, result_summary, run_id])?;
+    Ok(())
+}
+
+pub fn get_sub_agent_runs_for_goal(conn: &Connection, goal_id: &str) -> Result<Vec<SubAgentRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, goal_id, role, conversation_id, status, result_summary, worktree_path, created_at, completed_at \
+         FROM sub_agent_runs WHERE goal_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![goal_id], |row| {
+        Ok(SubAgentRun {
+            id: row.get(0)?,
+            goal_id: row.get(1)?,
+            role: row.get(2)?,
+            conversation_id: row.get(3)?,
+            status: row.get(4)?,
+            result_summary: row.get(5)?,
+            worktree_path: row.get(6)?,
+            created_at: row.get(7)?,
+            completed_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

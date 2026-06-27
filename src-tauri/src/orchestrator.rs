@@ -21,6 +21,14 @@ pub struct SubAgent {
     pub produces_output: bool,
 }
 
+/// Phase 5：真子代理派發資訊（Planner/Generator/Evaluator）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealSubAgentDispatch {
+    pub role: String,
+    pub input: String,
+    pub priority: u8,
+}
+
 impl SubAgent {
     pub(crate) fn all_agents() -> Vec<Self> {
         vec![
@@ -291,6 +299,47 @@ impl Orchestrator {
         }
 
         (all_audits, pending)
+    }
+
+    // ── Phase 5：真子代理派發（Execute 階段，與驗證 gate 並存）──
+
+    /// 派發真子代理（Planner/Generator/Evaluator）。
+    ///
+    /// 與 `dispatch_subagents`（22 道驗證 gate = Sensor）的關係：
+    /// - `dispatch_subagents`：Verify 階段的感測層（22 gate）
+    /// - `dispatch_real_subagents`：Execute 階段的執行層（真子代理）
+    /// - 兩層獨立：Generator 產出 → Evaluator 驗證 → 通過後再過 22 gate
+    ///
+    /// 本方法為同步介面，實際子代理執行由 `loop_engine.rs` 的 `AutonomousLoop`
+    /// 透過 `sub_agent.rs` 的 `run_evaluator_optimizer_loop` 異步驅動。
+    /// 此處僅提供路由資訊（哪些角色需要激活），供外層迴圈查詢。
+    pub fn dispatch_real_subagents(
+        &self,
+        goal: &str,
+    ) -> Vec<RealSubAgentDispatch> {
+        let mut dispatches = Vec::new();
+
+        // Planner 恆常激活（每次都需要拆解）
+        dispatches.push(RealSubAgentDispatch {
+            role: "Planner".to_string(),
+            input: format!("目標：{}", goal),
+            priority: 0,
+        });
+
+        // Generator + Evaluator 由 Planner 拆解結果決定數量
+        // 這裡只回傳角色清單，實際數量由 loop_engine 依子任務數動態建立
+        dispatches.push(RealSubAgentDispatch {
+            role: "Generator".to_string(),
+            input: "待 Planner 拆解後填入".to_string(),
+            priority: 1,
+        });
+        dispatches.push(RealSubAgentDispatch {
+            role: "Evaluator".to_string(),
+            input: "待 Generator 產出後填入".to_string(),
+            priority: 2,
+        });
+
+        dispatches
     }
 
     // ── Execute task with healing loop ──

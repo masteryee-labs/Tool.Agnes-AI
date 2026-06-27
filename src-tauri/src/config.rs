@@ -100,6 +100,12 @@ pub struct Config {
     pub model_routing: ModelRoutingConfig,
     #[serde(default)]
     pub multimodal: MultimodalConfig,
+    #[serde(default)]
+    pub loop_engine: LoopEngineConfig,
+    #[serde(default)]
+    pub sub_agent: SubAgentConfig,
+    #[serde(default)]
+    pub worktree: WorktreeConfig,
 }
 
 // ─── MultimodalConfig ────────────────────────────────────────────────────────
@@ -410,6 +416,108 @@ pub struct McpServerConfig {
 }
 
 fn default_mcp_enabled() -> bool { true }
+
+// ─── LoopEngineConfig（Phase 5 自主迴圈）──────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LoopEngineConfig {
+    /// 自主迴圈最大迭代次數（防無限循環）
+    #[serde(default = "default_loop_max_iterations")]
+    pub max_iterations: i64,
+    /// 同一失敗碼連續失敗幾輪後升級 premium 模型
+    #[serde(default = "default_loop_max_same_failures")]
+    pub max_same_failures: i64,
+    /// 升級 premium 後再失敗即標 FAILED 停止
+    #[serde(default = "default_loop_premium_retry")]
+    pub premium_retry: bool,
+    /// 每輪 token 預算上限（從 TokenBudgeter 領取）
+    #[serde(default = "default_loop_per_iteration_budget")]
+    pub per_iteration_budget: u64,
+}
+
+fn default_loop_max_iterations() -> i64 { 10 }
+fn default_loop_max_same_failures() -> i64 { 3 }
+fn default_loop_premium_retry() -> bool { true }
+fn default_loop_per_iteration_budget() -> u64 { 50_000 }
+
+impl Default for LoopEngineConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_loop_max_iterations(),
+            max_same_failures: default_loop_max_same_failures(),
+            premium_retry: default_loop_premium_retry(),
+            per_iteration_budget: default_loop_per_iteration_budget(),
+        }
+    }
+}
+
+// ─── SubAgentConfig（Phase 5 真子代理）────────────────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SubAgentConfig {
+    /// Evaluator REJECT 後 Generator 最多修正幾輪
+    #[serde(default = "default_sub_agent_max_repair_rounds")]
+    pub max_repair_rounds: i64,
+    /// Planner 使用的模型檔位（flash 級）
+    #[serde(default = "default_sub_agent_planner_model")]
+    pub planner_model: String,
+    /// Generator 使用的模型檔位（主力）
+    #[serde(default = "default_sub_agent_generator_model")]
+    pub generator_model: String,
+    /// Evaluator 使用的模型檔位（flash 級，獨立驗證）
+    #[serde(default = "default_sub_agent_evaluator_model")]
+    pub evaluator_model: String,
+    /// 子代理間是否啟用 git worktree 隔離
+    #[serde(default = "default_sub_agent_worktree_isolation")]
+    pub worktree_isolation: bool,
+}
+
+fn default_sub_agent_max_repair_rounds() -> i64 { 5 }
+fn default_sub_agent_planner_model() -> String { "agnes-2.0-flash".to_string() }
+fn default_sub_agent_generator_model() -> String { "agnes-2.0-flash".to_string() }
+fn default_sub_agent_evaluator_model() -> String { "agnes-2.0-flash".to_string() }
+fn default_sub_agent_worktree_isolation() -> bool { true }
+
+impl Default for SubAgentConfig {
+    fn default() -> Self {
+        Self {
+            max_repair_rounds: default_sub_agent_max_repair_rounds(),
+            planner_model: default_sub_agent_planner_model(),
+            generator_model: default_sub_agent_generator_model(),
+            evaluator_model: default_sub_agent_evaluator_model(),
+            worktree_isolation: default_sub_agent_worktree_isolation(),
+        }
+    }
+}
+
+// ─── WorktreeConfig（Phase 5 Git Worktree 隔離）───────────────────────────────
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WorktreeConfig {
+    /// worktree 根目錄（相對於 workspace 或絕對路徑）
+    #[serde(default = "default_worktree_base_dir")]
+    pub base_dir: String,
+    /// worktree 分支前綴
+    #[serde(default = "default_worktree_branch_prefix")]
+    pub branch_prefix: String,
+    /// 完成後是否自動清理 worktree
+    #[serde(default = "default_worktree_auto_cleanup")]
+    pub auto_cleanup: bool,
+}
+
+fn default_worktree_base_dir() -> String { ".agnes-worktrees".to_string() }
+fn default_worktree_branch_prefix() -> String { "agnes-agent".to_string() }
+fn default_worktree_auto_cleanup() -> bool { true }
+
+impl Default for WorktreeConfig {
+    fn default() -> Self {
+        Self {
+            base_dir: default_worktree_base_dir(),
+            branch_prefix: default_worktree_branch_prefix(),
+            auto_cleanup: default_worktree_auto_cleanup(),
+        }
+    }
+}
 
 // ─── Config helpers ──────────────────────────────────────────────────────────
 
