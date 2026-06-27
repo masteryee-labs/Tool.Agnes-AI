@@ -1,0 +1,97 @@
+@struct Security version:2 format:toon
+@struct
+  description: 零信任安全策略 金鑰隔離 沙盒對齊 確認閘門 語系校準 OWASP 對齊
+  mode: on-demand
+  doc: Docs/05_SECURITY_MODEL.md
+  supersedes: security_policies.toon, confirmation_gate.toon, core.agents.toon (Security 段)
+
+@struct KeyIsolation
+  description: API Key 絕對禁止硬編碼
+  rules:
+    - API Key 必須寫入 config.local.toml
+    - config.local.toml 必須在 .gitignore 中
+    - 重開程式自動從 config.local.toml 讀取
+    - 掃描所有 .rs 禁止出現 sk- 開頭實鑰字串
+    - 範例一律 {{API_KEY}} 佔位符 由後端注入
+    - 違反者一票否決
+
+@struct SandboxExitCode
+  description: 沙盒 Exit Code 硬性對齊 零虛假回報
+  rules:
+    - Exit Code == 0 且 stderr.is_empty() 才判定成功
+    - 模型回報成功但 Exit Code != 0 判定虛假回報
+    - 自動攔截並將真實 Stderr 砸回主編排官
+    - 觸發自愈懲罰循環
+    - 所有代碼執行必須在隔離沙盒中進行
+    - 沙盒隔離必須實作 Exit Code 與 Stderr 硬性擷取
+    - 禁止信任大模型口頭報告
+
+@struct DeterministicState
+  description: SQLite 確定性狀態機 不依賴 AI 上下文記憶
+  rules:
+    - 所有原子任務寫入 SQLite task_status: PENDING/SUCCESS
+    - 每一輪新對話從 SQLite 讀取真實狀態
+    - 狀態以硬編碼不可篡改的 System 上下文注入 API Request
+    - 禁止依賴長對話 Context 記憶專案進度
+
+@struct DefensiveCoding
+  description: 引數向量化分離 防禦非預期引數擴展與指令鏈篡改
+  rules:
+    - 所有 Shell 命令必須使用引數向量分離 argument vectorization
+    - 禁止拼接用戶輸入到命令中
+    - .gitignore 必須包含 config.local.toml 與 .env
+
+@struct ConfirmationGate
+  description: Zero-trust 確認閘門 無批准不執行
+  risk_levels:
+    Low: 讀取/列目錄/搜索
+    Medium: 修改現有檔/創建/重命名
+    High: 編譯 Rust/執行測試/改系統配置
+    Critical: 刪除檔案目錄/rm -rf/格式化/改 .gitignore
+  gates:
+    - G1 DestructiveCheck: 掃描 rm -rf format del Remove-Item 等破壞性操作
+    - G2 PathScopeVerification: 全域模式驗證執行路徑在允許列表中
+    - G3 SubagentAudit: 審查代理人分工路由正確
+    - G4 ExecutionLog: 記錄已批准/拒絕動作於 Audit Log
+  allowed_paths:
+    - C:\Users\MasterYee\Documents\Program
+    - C:\Users\MasterYee\Documents
+    - C:\Users\MasterYee
+  blocked_patterns:
+    - C:\Windows
+    - C:\System32
+  workflow:
+    - Orchestrator 產生 PendingAction 列表
+    - PendingActions 以 ConfirmationGate UI 展示
+    - 使用者逐項 Approve / Reject
+    - 僅 Approve 動作進入沙盒執行
+    - SandboxRuntimeTester 回傳 Exit Code + Stderr
+    - 結果記錄 Audit Log
+    - Exit Code != 0 觸發 Delta-Only 自愈重寫
+
+@struct LocaleCalibration
+  description: 語系校準必在任何 Shell 執行前
+  rules:
+    - Windows: 注入 chcp 65001 切換至 UTF-8
+    - Linux/macOS: 設置 LANG=zh_TW.UTF-8 與 LC_ALL=zh_TW.UTF-8
+    - 所有命令執行前必須校準語系
+    - 禁止無校準直接調用 Shell
+    - 所有輸出必須 100% 正確編碼
+
+@struct OwaspChecklist
+  description: OWASP Top 10 對齊安全審查 寫完 code 第一道防線
+  coverage:
+    - A01 Broken Access Control: 路徑穿越/特權提升掃描
+    - A02 Cryptographic Failures: 金鑰硬編碼 sk- 掃描
+    - A03 Injection: SQL/命令/間接 shell 注入檢查
+    - A04 Insecure Design: 輸入驗證缺失檢查
+    - A05 Security Misconfiguration: .gitignore 完整性
+    - A07 Identification & Auth Failures: 認證 middleware 缺失
+    - A08 Software & Data Integrity: 反序列化/未驗證輸入
+    - A09 Logging & Monitoring Failures: 日誌洩漏金鑰
+  rules:
+    - 每個發現必須綁定 OWASP 編號與可驗證標準 禁止聽起來專業但無法驗證
+    - 審查輸出強制 [PASS] 或 [REJECT: OWASP編號 | 檔案:行號 | 修復指示]
+    - 錯誤訊息本身包含修復指示 正向 prompt injection
+
+@end

@@ -135,7 +135,7 @@ fn stderr_has_real_error(stderr: &str) -> bool {
 /// 限制：單檔檢查無法解析跨檔引用；偵測到 E0432/E0433/E0583 時整檔跳過。rustc 不存在時跳過。
 pub fn check_rs_compiles(path: &std::path::Path, max_lines: usize) -> Option<String> {
     let meta_out = std::env::temp_dir().join("agnes_align.rmeta");
-    let output = std::process::Command::new("rustc")
+    let output = crate::no_window::silent_command("rustc")
         .args(["--edition", "2021", "--crate-type", "lib", "--emit", "metadata", "-o"])
         .arg(&meta_out)
         .arg(path)
@@ -178,7 +178,7 @@ pub fn run_rs_tests(path: &std::path::Path, max_lines: usize) -> Option<String> 
         test_bin.set_extension("exe");
     }
     // 編譯測試執行檔
-    let compile = std::process::Command::new("rustc")
+    let compile = crate::no_window::silent_command("rustc")
         .args(["--test", "--edition", "2021", "-o"])
         .arg(&test_bin)
         .arg(path)
@@ -196,7 +196,7 @@ pub fn run_rs_tests(path: &std::path::Path, max_lines: usize) -> Option<String> 
         return None;
     }
     // 執行測試（locale 校準確保中文輸出不亂碼），取真實 Exit Code
-    let mut run_cmd = std::process::Command::new(&test_bin);
+    let mut run_cmd = crate::no_window::silent_command(&test_bin.to_string_lossy());
     crate::locale::set_locale_env(&mut run_cmd, None, None);
     let run = match run_cmd.output() {
         Ok(o) => o,
@@ -407,10 +407,13 @@ impl AgentLoop {
             return Err("Token budget exceeded! Session budget has been locked.".to_string());
         }
 
-        let api_url = self.config.api.base_url.clone();
+        let api_url = self.config.api.base_url.trim().to_string();
 
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.config.api.timeout_seconds))
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("無法初始化 HTTP 客戶端: {}", e))?;
 
@@ -801,7 +804,20 @@ impl AgentLoop {
                 .await
             {
                 Ok(r) => r,
-                Err(e) => return Err(format!("無法連接 API 伺服器: {}", e)),
+                Err(e) => {
+                    // 連接錯誤也重試（網路暫時中斷、DNS 解析失敗等）
+                    if attempt + 1 < self.config.api.retry_max_attempts {
+                        eprintln!(
+                            "[AgentLoop] API connection error (attempt {}/{}): {} — retrying in {}s",
+                            attempt + 1, self.config.api.retry_max_attempts, e, backoff
+                        );
+                        tokio::time::sleep(Duration::from_secs(backoff)).await;
+                        backoff = ((backoff as f64) * self.config.api.retry_backoff_multiplier)
+                            .min(self.config.api.retry_max_backoff_secs as f64) as u64;
+                        continue;
+                    }
+                    return Err(format!("無法連接 API 伺服器（已重試 {} 次）: {}", attempt + 1, e));
+                }
             };
 
             let status = res.status();

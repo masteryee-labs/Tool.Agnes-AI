@@ -165,13 +165,17 @@ pub fn audit_distillation(original: &str, distilled: &str) -> Result<(), String>
 pub struct MemoryManager {
     pub workspace_path: PathBuf,
     pub memory_tags_path: PathBuf,
+    /// 跨 Session 記憶目錄（.agent/memory/）
+    pub agent_memory_path: PathBuf,
 }
 
 impl MemoryManager {
     pub fn new(workspace_path: PathBuf) -> Self {
         let memory_tags_path = workspace_path.join("memory_tags");
+        let agent_memory_path = workspace_path.join(".agent").join("memory");
         Self {
             workspace_path,
+            agent_memory_path,
             memory_tags_path,
         }
     }
@@ -605,6 +609,132 @@ impl MemoryManager {
         }
         context.push_str("==========================\n");
         context
+    }
+
+    // ─── 跨 Session 記憶（Phase 5D：.agent/memory/ 三檔）──────────────────────
+
+    /// 確保 .agent/memory/ 目錄存在。
+    fn ensure_agent_memory_dir(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.agent_memory_path)
+    }
+
+    /// loop_state.md 的完整路徑。
+    pub fn loop_state_path(&self) -> PathBuf {
+        self.agent_memory_path.join("loop_state.md")
+    }
+
+    /// lessons.md 的完整路徑。
+    pub fn lessons_path(&self) -> PathBuf {
+        self.agent_memory_path.join("lessons.md")
+    }
+
+    /// pitfalls.md 的完整路徑。
+    pub fn pitfalls_path(&self) -> PathBuf {
+        self.agent_memory_path.join("pitfalls.md")
+    }
+
+    /// 讀取 loop_state.md（當前任務進度）。
+    pub fn read_loop_state(&self) -> String {
+        let path = self.loop_state_path();
+        std::fs::read_to_string(&path).unwrap_or_default()
+    }
+
+    /// 追加 ≤3 行到 loop_state.md（每子任務蒸餾）。
+    pub fn append_loop_state(&self, lines: &str) -> std::io::Result<()> {
+        self.ensure_agent_memory_dir()?;
+        let path = self.loop_state_path();
+        let mut content = std::fs::read_to_string(&path).unwrap_or_default();
+        content.push_str(lines);
+        content.push('\n');
+        std::fs::write(&path, content)
+    }
+
+    /// 達 40 行時中段蒸餾：已完成子任務壓成 1 行摘要，只留未完成詳細。
+    pub fn distill_loop_state(&self) -> std::io::Result<()> {
+        let path = self.loop_state_path();
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        if lines.len() < 40 {
+            return Ok(());
+        }
+        // 取前半壓成摘要 + 後半保留
+        let midpoint = lines.len() / 2;
+        let summary = format!("[蒸餾] 前 {} 行已完成子任務摘要", midpoint);
+        let mut distilled = Vec::new();
+        distilled.push(summary);
+        distilled.extend(lines[midpoint..].iter().map(|s| s.to_string()));
+        std::fs::write(&path, distilled.join("\n"))
+    }
+
+    /// 任務完成時清空 loop_state.md + 晉升 1 條 lesson。
+    pub fn clear_loop_state_and_promote(&self, lesson: &str) -> std::io::Result<()> {
+        self.ensure_agent_memory_dir()?;
+        // 清空 loop_state
+        std::fs::write(self.loop_state_path(), "")?;
+        // 晉升 lesson
+        self.append_lesson(lesson)
+    }
+
+    /// 讀取 lessons.md（跨 Session 教訓），回傳行列表。
+    pub fn read_lessons(&self) -> Vec<String> {
+        let path = self.lessons_path();
+        std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    /// 追加 1 條 lesson（FIFO 30 條上限）。
+    pub fn append_lesson(&self, line: &str) -> std::io::Result<()> {
+        self.ensure_agent_memory_dir()?;
+        let path = self.lessons_path();
+        let mut lessons = self.read_lessons();
+        lessons.push(line.to_string());
+        // FIFO 30 條上限
+        if lessons.len() > 30 {
+            let drain = lessons.len() - 30;
+            lessons.drain(..drain);
+        }
+        std::fs::write(&path, lessons.join("\n") + "\n")
+    }
+
+    /// 讀取 pitfalls.md（跨 Session 雷庫），回傳行列表。
+    pub fn read_pitfalls(&self) -> Vec<String> {
+        let path = self.pitfalls_path();
+        std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    /// 追加 1 條 pitfall（去重 + 每領域 ≤5 條）。
+    pub fn append_pitfall(&self, domain: &str, line: &str) -> std::io::Result<()> {
+        self.ensure_agent_memory_dir()?;
+        let path = self.pitfalls_path();
+        let entry = format!("[{}] {}", domain, line);
+        let mut pitfalls = self.read_pitfalls();
+        // 去重：完全相同的行不重複加入
+        if pitfalls.iter().any(|p| p == &entry) {
+            return Ok(());
+        }
+        // 每領域 ≤5 條：計算同領域已有幾條
+        let domain_prefix = format!("[{}] ", domain);
+        let domain_count = pitfalls
+            .iter()
+            .filter(|p| p.starts_with(&domain_prefix))
+            .count();
+        if domain_count >= 5 {
+            // 移除該領域最舊的一條
+            if let Some(pos) = pitfalls.iter().position(|p| p.starts_with(&domain_prefix)) {
+                pitfalls.remove(pos);
+            }
+        }
+        pitfalls.push(entry);
+        std::fs::write(&path, pitfalls.join("\n") + "\n")
     }
 }
 

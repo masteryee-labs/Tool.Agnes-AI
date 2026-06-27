@@ -1,6 +1,6 @@
 [package]
 name = "agnes-ai"
-version = "0.8.2"
+version = "0.8.3"
 description = "Agnes AI High-Defense Desktop Engine (Native Rust GUI / Zero WebView2)"
 authors = ["masteryee-labs"]
 edition = "2021"
@@ -21,7 +21,7 @@ tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 toml = "0.8"
 uuid = { version = "1.8", features = ["v4", "serde"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 walkdir = "2"
 rfd = "0.14"
 regex = "1.10"

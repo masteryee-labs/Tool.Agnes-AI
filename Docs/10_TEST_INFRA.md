@@ -47,7 +47,7 @@ The test suite covers four core features, directly mapped from the requirements 
 ### R1: QA Repair (Prompt Self-Repair Pipeline)
 - **Description**: The mechanism to intercept failed tool calls, map failures to repair instructions, and pre-inject historical repairs.
 - **Keys**:
-  - Intercepting validation gate failures (e.g., structure, schema, paths, commands) via `.agent/rules/qa_validation.toon`.
+  - Intercepting validation gate failures (e.g., structure, schema, paths, commands) via `.agent/rules/verification.toon`.
   - Fetching repair instructions from the `repair_table`.
   - Appending delta feedback (error code, error line, repair payload) back to the agent instead of full-context resubmission.
   - Recording successful repair instructions in `memory_tags/qa_pipeline/`.

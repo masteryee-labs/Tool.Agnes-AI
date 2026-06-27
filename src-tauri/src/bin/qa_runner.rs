@@ -4,7 +4,7 @@
 //!
 //! 用法：cargo run --release --bin qa_runner [small|medium|large|all]
 
-use app_lib::{AgentLoop, Config, McpManager, TokenBudgeter};
+use app_lib::{AgentLoop, Config, McpManager, TokenBudgeter, no_window::NoWindowExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -44,6 +44,7 @@ fn long_path(p: &Path) -> PathBuf {
 /// 測試斷言失敗印在 stdout、編譯錯誤在 stderr——兩者都擷取供自愈回饋。
 fn cargo_test_in(dir: &Path) -> (i32, String) {
     let output = Command::new("cmd")
+        .no_window()
         .arg("/C")
         .arg("chcp 65001 >nul && cargo test")
         .current_dir(dir)

@@ -1,6 +1,6 @@
 # 05 — 零信任安全模型
 
-> 規則檔：`.agent/rules/security_policies.toon`、`.agent/rules/confirmation_gate.toon`。
+> 規則檔：`.agent/rules/security.toon`（含安全策略 + 確認閘門）。
 > 核心立場：模型輸出 = 不可信外部輸入。所有執行過五道防線。
 
 ## 五道防線
@@ -26,17 +26,19 @@
 
 | 層級 | 機制 | 狀態 |
 |---|---|---|
-| L1 行程隔離 | std::process + 引數向量分離 + 工作目錄圈禁 + 逾時殺除 | 已實作（sandbox.rs） |
+| L1 行程隔離 | std::process + 引數向量分離 + 工作目錄圈禁 + 逾時殺除 + CREATE_NO_WINDOW | 已實作（sandbox.rs + no_window.rs） |
 | L2 WASM | wasmtime 執行不可信代碼片段 | 規劃（Phase 3） |
 | L3 Docker | 編譯/測試級任務的完整隔離（`--network=none` 預設） | 規劃（Phase 3，桌面端限定） |
 
 語系前置（locale.rs）：任何沙盒執行前 Windows 注入 `chcp 65001`、Unix 注入 `LANG=zh_TW.UTF-8` + `LC_ALL=zh_TW.UTF-8`，確保 Stderr 解碼 100% 正確——亂碼的 Stderr 會讓自愈迴圈誤判，這是安全問題不只是顯示問題。
 
+無視窗執行（no_window.rs）：Windows 上所有子進程（sandbox、rustc、cargo、git、MCP Server）統一注入 `CREATE_NO_WINDOW` flag，在背景靜默執行，不彈出 CMD/PowerShell 視窗干擾使用者桌面。對標 Claude Code / Codex / Devin / Antigravity 2.0 的嵌入式終端體驗。
+
 ## 全域模式（Hermes 式全電腦代理）的「互相確認」協議
 
 全域模式（`global_execute`）權力最大，因此約束最多：
 
-1. **雙向確認**：每個 PendingAction 必須 (a) 通過機器側 Gate 1–4（confirmation_gate.toon）且 (b) 使用者在 UI 逐項 Approve。任一否決即丟棄。Critical 級另要求使用者輸入動作摘要關鍵詞二次確認（防誤點）。
+1. **雙向確認**：每個 PendingAction 必須 (a) 通過機器側 Gate 1–4（security.toon）且 (b) 使用者在 UI 逐項 Approve。任一否決即丟棄。Critical 級另要求使用者輸入動作摘要關鍵詞二次確認（防誤點）。
 2. **路徑白名單**：僅 AllowedPaths 列出的根目錄；`C:\Windows`、`C:\System32` 永久封鎖，白名單修改本身屬 Critical 級。
 3. **無靜默升權**：全域模式下不存在 auto_approve（四個風險級全部 `auto_approve: false`）。
 4. **完整審計**：每筆 Approve/Reject/執行結果進 `audit_logs` 表，UI 可回放。

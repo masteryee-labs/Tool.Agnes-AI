@@ -1,7 +1,7 @@
 # 04 — Token 極致節約與「邏輯優先於 LLM」演算法
 
 > 原則：能用 Rust 確定性邏輯解決的，一個 token 都不花。LLM 只負責「語意判斷」這一件機器邏輯做不到的事。
-> 規則檔：`.agent/rules/token_economy.toon`。
+> 規則檔：`.agent/rules/harness.toon`。
 
 ## 誠實前提
 
@@ -85,3 +85,33 @@ pub struct TokenBudgeter {
 3. 讓模型複述任務狀態（狀態注入是後端的事）
 4. 語意審查用主力檔模型（一律 flash 級）
 5. 重試時重送相同 prompt 期待不同結果（必須先過 repair_table 修補）
+
+## Phase 5 Token 經濟：自主迴圈 + 子代理
+
+> 自主迴圈引入新的 token 消耗來源，需額外的節約策略。
+
+### 子代理 token 預算分配
+
+| 子代理角色 | 模型檔位 | 預算佔比 | 節約機制 |
+|---|---|---|---|
+| Planner | flash 級 | ≤10% | 拆解結果寫 SQLite，不重複呼叫 |
+| Generator | 主力檔 | ≤60% | Delta-only + worktree 隔離避免重做 |
+| Evaluator | flash 級 | ≤20% | 獨立驗證，REJECT 訊息結構化最小化 |
+| 22 gate（Sensor） | 16 道 0 token + flash | ≤10% | 休眠路由，未激活零成本 |
+
+### 自主迴圈 token 控制
+
+- **每輪預算上限**：`AutonomousLoop` 每輪從 `TokenBudgeter` 領取預算，耗盡即停止該輪
+- **迭代上限**：最多 3 輪同失敗碼 → 升級 premium 一次 → 再失敗 FAILED（禁止無限循環浪費）
+- **跨 Session 記憶省 token**：Discover 階段讀 `lessons.md` + `pitfalls.md`，避免重複踩雷的重試成本
+- **子代理間不重送上下文**：子代理間只透過 SQLite + mpsc 溝通，禁止把整個對話歷史在子代理間傳遞
+
+### 跨 Session 記憶的 token 投資回報
+
+| 機制 | 一次性成本 | 長期節約 |
+|---|---|---|
+| `loop_state.md` 蒸餾 | 每子任務 ≤3 行寫入 | 跨 Session 接續，省去重新探索 |
+| `lessons.md` 晉升 | 任務完成 1 條 | 避免重複已學教訓的重試 |
+| `pitfalls.md` 去重 | 發現時 1 條 | 避免跨工具重複踩雷的 N 輪重試 |
+
+> 投資回報率：每條 lesson/pitfall 的寫入成本（≤2 行）< 避免一次重試的成本（1 輪 API 呼叫）。
