@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use crate::no_window::NoWindowExt;
 use crate::locale;
 
 // ─── SandboxResult ────────────────────────────────────────────────────────────
@@ -387,6 +388,7 @@ pub fn validate_cmd_length(program: &str, args: &[&str]) -> Result<(), String> {
 /// 執行 Command 並擷取 stdout / stderr / exit code。
 fn capture_output(cmd: &mut Command) -> SandboxResult {
     let output = match cmd
+        .no_window()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -593,6 +595,7 @@ pub fn run_wasm_func(
 /// 偵測 docker CLI 是否可用（執行 `docker --version`，瞬時且無副作用）。
 pub fn docker_available() -> bool {
     Command::new("docker")
+        .no_window()
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -646,6 +649,7 @@ pub fn run_in_docker_sandbox(
     let docker_args = build_docker_args(program, args, &ws, image, network);
     let mut cmd = Command::new("docker");
     cmd.args(&docker_args);
+    cmd.no_window();
     capture_output(&mut cmd)
 }
 

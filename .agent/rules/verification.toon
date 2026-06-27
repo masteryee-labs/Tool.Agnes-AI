@@ -1,15 +1,9 @@
-@struct QaValidation version:1 format:toon
+@struct Verification version:2 format:toon
 @struct
-  description: 全自動 QA 驗證閘門與提示詞自修正規則 API 回傳先驗證再放行
-  mode: all
+  description: 寫檔前驗證管線 + QA 自修正迴圈 合併 cross_validation + qa_validation
+  mode: on-demand
   doc: Docs/03_QA_AUTOPILOT.md
-
-@struct QaConfig
-  description: QA 參數 全部由 Config.qa 載入
-  max_repairs: 3
-  stderr_max_lines: 30
-  escalate_after_repairs: 3
-  corpus_dir: src-tauri/tests/fixtures/qa_corpus
+  supersedes: cross_validation.toon, qa_validation.toon
 
 @struct DeterministicGates
   description: 第一層 確定性驗證 0 token 全過才考慮語意層
@@ -19,24 +13,31 @@
     - D3 [E_ARGS]: sanitize_all_args + validate_cmd_length 引數消毒
     - D4 [E_PATH]: has_path_traversal_component + is_path_in_workspace 路徑圈禁
     - D5 [E_SHELL]: check_indirect_shell_injection 間接注入
-    - D6 [E_SECRET]: 金鑰前綴 sk- 正則掃描
+    - D6 [E_SECRET]: 金鑰前綴 sk- 正則掃描 veto:true
     - D7 [E_DESTRUCT]: 破壞性指令模式 轉 PendingAction
-    - D8 [E_COMPILE]: 代碼產物 cargo check 真實 Exit Code
+    - D8 [E_COMPILE]: cargo check 真實 Exit Code veto:true
+    - D9 [SlopVibeAuditor]: banned_words 正則掃描
+    - D10 [SlopPathPurge]: .md 歸 Docs/ .toon 歸 .agent/rules/ Magic Number 掃描
+    - D11 [LocaleCalibration]: 語系環境變數已注入
+    - D12 [CargoTomlGuard]: 禁 Chromium/WebView 系依賴
+    - D13 [NoPlaceholder]: 禁 TODO unimplemented! 省略標記
 
 @struct SemanticGate
-  description: 第二層 語意審查 按風險分級
+  description: 第二層 語意審查 按風險分級 flash 級模型
   rules:
     - 風險 Low/Medium 且第一層全過 跳過語意層 不花 token
     - 風險 High/Critical 必過 run_audits 使用 flash 級模型
     - 審查輸出強制 [PASS] 或 [REJECT: 行號+邏輯鏈]
-    - 寫檔操作另過 cross_validation.toon 22 道管線
+    - FactHallucinationAuditor: 變更摘要 vs 實際 diff 交叉比對 聲稱與實作不符即 REJECT veto:true
 
 @struct ExitCodeAlignment
   description: 第三層 沙盒硬性對齊 執行後
   rules:
     - Exit Code == 0 且 stderr 為空才判定成功
     - 模型聲稱成功但 Exit Code != 0 判定虛假回報 攔截並砸回真實 Stderr
-    - Stderr 回饋截斷至 stderr_max_lines
+    - Stderr 回饋截斷至 30 行
+    - cargo clippy -D warnings veto:true
+    - cargo test 真實 Exit Code veto:true
 
 @struct RepairTable
   description: 失敗碼對應提示詞修補 禁止盲目重試相同 prompt
@@ -48,13 +49,13 @@
     - E_PATH: 附允許 workspace 根路徑 + 所有路徑必須位於其下且禁止 ..
     - E_SECRET: 金鑰一律 {{API_KEY}} 佔位符 由後端注入
     - E_DESTRUCT: 改產生 PendingAction 交使用者確認 不得直接執行
-    - E_COMPILE: 只回 rustc 錯誤前 stderr_max_lines 行 + Delta-only 修正指令
+    - E_COMPILE: 只回 rustc 錯誤前 30 行 + Delta-only 修正指令
 
 @struct RepairLoop
-  description: 自修正迴圈控制
+  description: 自修正迴圈控制 最多 3 輪
   rules:
     - 回饋採 Delta-only 只送失敗碼+出錯行+修補指令 禁止重送整個上下文
-    - 同一失敗碼連續 max_repairs 次 換高檔模型重試一次
+    - 同一失敗碼連續 3 次 換高檔模型重試一次
     - 高檔重試再失敗 任務標 FAILED 寫 audit_log 停止
     - 修補成功的指令寫入 memory_tags/qa_pipeline/ 供同類任務預先注入
 
@@ -65,5 +66,13 @@
     - cargo test qa_replay 全語料重放確定性層 斷言判定不變
     - 新增驗證規則必須先讓全語料通過
     - 語料重放零 API 呼叫 CI 每次執行
+
+@struct ExecutionRules
+  description: 管線執行紀律
+  rules:
+    - 每道 gate 回傳 Pass / Reject{code,line,chain} / Skip{reason} 三態
+    - REJECT 訊息強制結構化 [REJECT: G編號 | 檔案:行號 | 原因] 禁止感性語句
+    - 任一 veto:true gate REJECT 立即中止後續 gate 退回自修正迴圈
+    - SKIP 必須附 reason 且記入 audit_logs 禁止靜默跳過
 
 @end

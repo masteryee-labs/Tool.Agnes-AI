@@ -1,7 +1,8 @@
 # 02 — 無限上下文分層記憶系統
 
 > 目標：突破單次 1M Token 物理限制，0 遺忘、0 幻覺殘留。
-> 新模組：`src-tauri/src/memory.rs`（待實作，P0）。規則檔：`.agent/rules/memory_distillation.toon`。
+> 模組：`src-tauri/src/memory.rs`（已實作：滑動視窗 + 漏斗 RAG + FTS5）。規則檔：`.agent/rules/memory.toon`。
+> Phase 5 擴充：`.agent/memory/` 三檔跨 Session 記憶（loop_state/lessons/pitfalls）。
 
 ## 儲存佈局
 
@@ -84,6 +85,54 @@ pub fn sliding_window_chunk(text: &str, cfg: &MemoryConfig) -> Vec<Chunk>
 - 任務樹、狀態（PENDING/SUCCESS/FAILED）、檔案路徑 → 只進 `agnes_state.db`（已實作 `db.rs`）
 - 每輪新對話：Rust 後端讀 SQLite → 組成不可篡改 System 區塊強行注入 API Request
 - 蒸餾 .md 內**禁止**記錄任務狀態（會過期），只記錄結論、決策、參數
+
+## 機制五：跨 Session 記憶（Phase 5，代理會忘倉庫不會忘）
+
+> 對齊 Loop Engineering Memory 組件 + AGENTS.md 跨記憶機制。
+> 解決跨 AI 工具 / 跨 Session 重複踩雷的 Token 浪費問題。
+
+### 三層記憶架構
+
+| 層 | 檔案 | 用途 | 硬性上限 | 觸發 |
+|---|---|---|---|---|
+| 短期進度 | `.agent/memory/loop_state.md` | 當前任務進度 | ≤50 行/≤2KB | 每子任務 ≤3 行；達 40 行中段蒸餾；任務完成清空 |
+| 長期教訓 | `.agent/memory/lessons.md` | 蒸餾後的教訓 | ≤30 條/每條 ≤2 行 | 任務完成時晉升；FIFO 刪最舊 |
+| 雷庫 | `.agent/memory/pitfalls.md` | 重複踩過的雷 | ≤40 條/每領域 ≤5 | 發現同類錯誤重複時；去重更新 |
+
+### 蒸餾協議（防止 loop_state 膨脹 + 跨 Session 防踩雷）
+
+```
+每完成一個子任務
+  │
+  ▼
+loop_state.md 追加 ≤3 行（做了什麼/改了哪些檔/下一步）
+  │
+  ├─ 達 40 行 → 中段蒸餾：已完成子任務壓成 1 行摘要，只留未完成詳細
+  │
+  └─ 任務全部完成
+       │
+       ├─ 全檔蒸餾為 1 條 lesson → 寫入 lessons.md（FIFO 30 條）
+       ├─ 清空 loop_state.md
+       └─ 發現同類錯誤跨 Session/跨工具重複 → 追加 pitfalls.md（先掃描去重）
+```
+
+### Discover 階段強制讀取（防跨 Session 重複踩雷）
+
+`loop_engine.rs` 在 Discover 階段必讀：
+1. `loop_state.md` — 接續上次中斷的進度
+2. `lessons.md` — 避免重複已學過的教訓
+3. `pitfalls.md` — 避免重複踩同類的雷
+
+### 與既有記憶系統的分工
+
+| 記憶層 | 儲存位置 | 生命週期 | 用途 |
+|---|---|---|---|
+| SQLite 狀態 | `agnes_state.db` | 單任務 | 任務樹/狀態/路徑（確定性真相） |
+| 跨 Session 記憶 | `.agent/memory/*.md` | 跨 Session | 進度/教訓/雷庫（AI 可讀可寫） |
+| 長期知識 | `memory_tags/[標籤]/` | 永久 | 蒸餾結論/決策/參數（RAG 檢索） |
+
+- 三層不重疊：SQLite 記狀態、`.agent/memory/` 記教訓、`memory_tags/` 記知識
+- `.agent/memory/` 是 AI 跨 Session 的「短期+中期記憶」，`memory_tags/` 是「長期記憶」
 
 ## 驗收測試（進 tests_integration.rs）
 

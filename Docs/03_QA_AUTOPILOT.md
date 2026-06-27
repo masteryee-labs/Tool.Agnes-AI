@@ -1,7 +1,7 @@
 # 03 — 全自動 QA：API 回傳驗證閘門與提示詞自修正
 
 > 問題：Agnes API 回傳的指令不保證正確或安全。開發階段必須**先驗證再放行**；驗證失敗時不是盲目重試，而是**修正提示詞**。
-> 規則檔：`.agent/rules/qa_validation.toon`。
+> 規則檔：`.agent/rules/verification.toon`。
 
 ## 設計總則
 
@@ -24,7 +24,7 @@ API 回傳 → `parse_tool_calls`（agent.rs:615）→ 進入閘門：
 | D4 | 路徑圈禁（無 `..` 越界、在 workspace 內） | `has_path_traversal_component` / `is_path_in_workspace` | `E_PATH` |
 | D5 | 間接 shell 注入（`sh -c`、`cmd /c` 包裝） | `check_indirect_shell_injection` | `E_SHELL` |
 | D6 | 金鑰洩漏掃描（輸出/代碼含 `sk-` 前綴） | regex 掃描 | `E_SECRET` |
-| D7 | 破壞性指令模式（rm -rf、format、Remove-Item -Recurse） | confirmation_gate.toon Gate 1 | `E_DESTRUCT` |
+| D7 | 破壞性指令模式（rm -rf、format、Remove-Item -Recurse） | security.toon Gate 1 | `E_DESTRUCT` |
 | D8 | Rust 代碼產物：`cargo check` 編譯通過 | 沙盒內執行，取 Exit Code | `E_COMPILE` |
 
 ### 第二層：語意審查（按風險分級才花 token）
@@ -39,7 +39,7 @@ API 回傳 → `parse_tool_calls`（agent.rs:615）→ 進入閘門：
 
 ## 提示詞自修正迴圈（Prompt Self-Repair Loop）
 
-REJECT 不等於重試同樣的話。失敗碼對應**確定性的提示詞修補規則**（存於 `qa_validation.toon` 的 repair_table）：
+REJECT 不等於重試同樣的話。失敗碼對應**確定性的提示詞修補規則**（存於 `verification.toon` 的 repair_table）：
 
 | 失敗碼 | 修補動作（注入 system prompt 的增量指令） |
 |---|---|
@@ -79,3 +79,30 @@ src-tauri/tests/fixtures/qa_corpus/
 | 每次執行後 | Exit Code 對齊 | 0 |
 | 每次 `cargo test` | qa_replay 全語料重放 + 既有 636 行整合測試 | 0 |
 | 寫檔前 | 22 道交叉驗證（06） | 16 道 0 token + 6 道低檔 |
+
+## Phase 5 整合：Evaluator 子代理與驗證閘門的關係
+
+> Phase 5 引入真子代理後，驗證流程從「單層 22 gate」升級為「雙層驗證」。
+
+### 雙層驗證流程
+
+```
+Generator 子代理產出
+  │
+  ▼
+第一層：Evaluator 子代理（推理型，獨立 AgentLoop）
+  │  └─ 獨立驗證生成結果是否符合子任務規格（語意層）
+  │  └─ REJECT → Delta 回饋 Generator，最多 3 輪
+  │  └─ PASS → 進入第二層
+  ▼
+第二層：22 道驗證 gate（本檔上方定義，Sensor 層）
+  │  └─ 確定性層 D1–D8（0 token）+ 語意層 + 沙盒對齊
+  │  └─ REJECT → 進入提示詞自修正迴圈
+  ▼
+兩層都通過 → 寫入磁碟
+```
+
+- **Evaluator 是語意驗證**（子任務規格符合度），22 gate 是結構+安全驗證
+- 兩層獨立：Evaluator 通過 ≠ 22 gate 通過；22 gate 通過 ≠ Evaluator 通過
+- Evaluator 的 REJECT 訊息可作為 G17 防幻覺 gate 的額外輸入（交叉驗證）
+- 最終寫入磁碟前兩層都必須通過
