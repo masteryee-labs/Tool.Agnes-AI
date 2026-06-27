@@ -1,7 +1,8 @@
-@struct AgnesAgents version:1 format:toon
+@struct AgnesAgents version:2 format:toon
 @struct
-  description: 22-agent teamwork protocol for Agnes AI — zero-trust execution with confirmation gates (本檔含第2-6組17人 第1組記憶蒸餾5人見 memory_distillation.toon 22道管線見 cross_validation.toon)
-  mode: /teamwork-preview
+  description: 22-agent teamwork protocol for Agnes AI — zero-trust execution with confirmation gates (本檔含第2-6組17人 第1組記憶蒸餾5人見 memory.toon 驗證管線見 verification.toon)
+  mode: on-demand
+  doc: Docs/06_AGENT_TEAM.md
 
 @struct WorkflowTopology
   description: 動態剪除多餘溝通步驟，進行 Token 消耗與非對稱模型路由最佳化
