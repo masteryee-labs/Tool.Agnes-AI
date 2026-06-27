@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::config::McpServerConfig;
+use crate::no_window::NoWindowExtTokio;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpTool {
@@ -26,6 +27,7 @@ pub struct McpServerProcess {
 impl McpServerProcess {
     pub async fn new(config: &McpServerConfig) -> Result<Self, String> {
         let mut cmd = Command::new(&config.command);
+        cmd.no_window();
         cmd.args(&config.args)
             .envs(&config.env)
             .stdin(Stdio::piped())
