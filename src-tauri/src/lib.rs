@@ -2,6 +2,7 @@ mod config;
 mod db;
 pub mod diffview;
 mod locale;
+pub mod no_window;
 mod rate_limiter;
 mod parallel;
 mod sandbox;
@@ -12,6 +13,9 @@ mod memory;
 mod multimodal;
 mod skills;
 mod validation;
+mod worktree;
+mod sub_agent;
+mod loop_engine;
 
 #[cfg(feature = "mobile")]
 mod mobile;
@@ -33,13 +37,22 @@ pub use locale::*;
 pub use sandbox::*;
 pub use rate_limiter::RateLimiter;
 pub use orchestrator::Orchestrator;
-pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLevel};
+pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLevel, RealSubAgentDispatch};
 pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
 pub use mcp::McpManager;
 pub use memory::*;
 pub use multimodal::{is_visual_intent, MediaResult, MultimodalManager};
 pub use skills::{build_skills_system_prompt, load_mcp_json, load_skills, SkillInfo};
 pub use validation::*;
+pub use worktree::{WorktreeManager, WorktreeHandle};
+pub use sub_agent::{
+    SubAgentInstance, SubAgentRole, SubAgentStatus, SubAgentResult,
+    EvaluatorOptimizerResult, run_evaluator_optimizer_loop,
+};
+pub use loop_engine::{
+    AutonomousLoop, LoopPhase, LoopState, LoopStatus, SubAgentRunSummary,
+};
+pub use config::{LoopEngineConfig, SubAgentConfig, WorktreeConfig};
 
 use std::path::PathBuf;
 use std::sync::Arc;
