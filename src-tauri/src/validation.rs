@@ -1,5 +1,6 @@
 use crate::agent::{AuditResult, ToolCall};
 use crate::config::Config;
+use crate::no_window::NoWindowExt;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -603,6 +604,7 @@ impl Gate for MemoryEfficiencyReviewerGate {
         
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = std::process::Command::new("cmd");
+            c.no_window();
             c.arg("/C").arg("chcp 65001 >nul && cargo clippy --message-format=json --quiet");
             c
         } else {
@@ -611,7 +613,7 @@ impl Gate for MemoryEfficiencyReviewerGate {
             c
         };
 
-        let output = match cmd.current_dir(&project_root).output() 
+        let output = match cmd.current_dir(&project_root).no_window().output()
         {
             Ok(out) => out,
             Err(e) => return GateResult::Skip { reason: format!("無法執行 cargo clippy: {}", e) },
@@ -662,6 +664,7 @@ impl Gate for SandboxRuntimeTesterGate {
         
         let mut cmd = if cfg!(target_os = "windows") {
             let mut c = std::process::Command::new("cmd");
+            c.no_window();
             c.arg("/C").arg("chcp 65001 >nul && cargo check");
             c
         } else {
@@ -670,7 +673,7 @@ impl Gate for SandboxRuntimeTesterGate {
             c
         };
 
-        let output = match cmd.current_dir(&run_dir).output()
+        let output = match cmd.current_dir(&run_dir).no_window().output()
         {
             Ok(out) => out,
             Err(e) => return GateResult::Skip { reason: format!("無法執行 cargo check: {}", e) },
