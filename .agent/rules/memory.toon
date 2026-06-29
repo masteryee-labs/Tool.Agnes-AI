@@ -1,8 +1,9 @@
-@struct MemoryDistillation version:1 format:toon
+@struct MemoryDistillation version:2 format:toon
 @struct
   description: 第一組 記憶蒸餾與防幻覺組 5 代理人 + 無限上下文記憶機制規則
-  mode: all
+  mode: on-demand
   doc: Docs/02_MEMORY_SYSTEM.md
+  LOAD_GATE: "僅在以下情況載入：(1) 修改 memory.rs / RAG 流程；(2) 任務涉及記憶蒸餾邏輯本身。日常任務的記憶寫入由 Rust 引擎自動處理，無需 AI 讀此檔。"
 
 @struct MemoryConfig
   description: 記憶系統硬性參數 全部由 Config.memory 載入 禁止散落代碼
