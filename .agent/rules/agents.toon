@@ -3,6 +3,8 @@
   description: 22-agent teamwork protocol for Agnes AI — zero-trust execution with confirmation gates (本檔含第2-6組17人 第1組記憶蒸餾5人見 memory.toon 驗證管線見 verification.toon)
   mode: on-demand
   doc: Docs/06_AGENT_TEAM.md
+  LOAD_GATE: "僅在以下情況載入此檔：(1) 修改 orchestrator.rs / agent.rs / sub_agent.rs / parallel.rs 本身；(2) 新增或刪除代理人；(3) 修改 AGENTS.md 路由表。其他所有任務禁止載入——此檔 221 行，讀一次耗 token 極多。"
+
 
 @struct WorkflowTopology
   description: 動態剪除多餘溝通步驟，進行 Token 消耗與非對稱模型路由最佳化

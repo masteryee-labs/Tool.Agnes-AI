@@ -1,22 +1,10 @@
-@struct Harness version:2 format:toon
+@struct Harness version:3 format:toon
 @struct
-  description: Harness Engineering 框架 Guides/Sensors 分離 + Token 經濟 + 模型路由 + Loop 迴圈紀律
+  description: Harness Engineering 框架 Guides/Sensors 分離 + Token 經濟 + 模型路由
   mode: on-demand
   doc: Docs/04_TOKEN_ECONOMY.md
-  supersedes: token_economy.toon, core.agents.toon (Meta-Workflow 段)
-
-@struct LoopProtocol
-  description: Loop Engineering 五階段迴圈 每次任務強制走
-  stages:
-    - Discover: 讀 SQLite 狀態 + 路由表指定 Docs 確認邊界
-    - Plan: 拆原子子任務 標目標檔與風險級
-    - Execute: Delta-only 實作守鋼鐵戒律
-    - Verify: 跑 verification.toon 分層感測器
-    - Iterate: 未過 Delta-only 修 最多 3 輪 第 3 輪升級 premium 重試一次 再不過 FAILED 停止
-  rules:
-    - 連續 3 輪相同輸出觸發上下文重置
-    - 超過 50 輪強制終止當前工作流
-    - 禁止無限循環自我修正 超上限果斷升級
+  supersedes_note: 已整合自舊版 token_economy.toon / core.agents.toon (Meta-Workflow 段)
+  note: Loop Engineering 5 階段迴圈定義在 AGENTS.md，本檔只含 Harness 特有配置
 
 @struct TokenBudget
   description: 預算參數 全部由 Config.api 載入 禁止散落
@@ -88,15 +76,5 @@
     - 代碼進 src-tauri/src/
     - 禁止 Magic Numbers 必須抽離至 Config 結構體
     - 禁止無意義註解和垃圾代碼
-
-@struct AntiPatterns
-  description: 審查時直接 REJECT 的反模式
-  rules:
-    - 為確認而呼叫 API 確認用 Exit Code 與 SQLite
-    - 整檔塞 prompt 只為改一行
-    - 讓模型複述任務狀態
-    - 語意審查用主力模型
-    - 重試時重送相同 prompt 未過 repair table
-    - 一次載入全部 .toon 規則
 
 @end

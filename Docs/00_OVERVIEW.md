@@ -5,6 +5,23 @@
 > 架構對齊：Loop Engineering（5 階段迴圈）+ Harness Engineering（Guides×Sensors 四象限）
 > 當前階段：Phase 0–5 已完成（自主代理 + 真子代理 + 極簡黑+白暗色 UI + 無視窗執行）
 
+## 快速決策錨（AI 讀此區即可做正確架構決策，無需讀完後續文件）
+
+**不可改的架構決策**（違反 = 一票否決）：
+- GUI 框架：eframe/egui，零 Tauri/Chromium/WebView2 依賴（見 `agents.toon` LeadSystemArchitect）
+- HTTP 客戶端：reqwest 非同步，禁同步 HTTP 呼叫
+- 狀態機：SQLite（`agnes_state.db`），tasks 表 PENDING/SUCCESS，禁止依賴對話上下文
+- 沙盒：WASM（wasmi 直譯器）+ Docker（`--network=none`）+ Exit Code 硬性擷取
+- 金鑰隔離：`config.local.toml`，禁止硬編碼 `sk-` 前綴
+
+**已完成模組**（禁止重複實作）：
+`orchestrator.rs` / `agent.rs` / `sandbox.rs` / `db.rs` / `config.rs` / `locale.rs` / `mcp.rs` / `memory.rs` / `rate_limiter.rs` / `parallel.rs` / `multimodal.rs` / `mobile.rs` / `loop_engine.rs` / `sub_agent.rs` / `worktree.rs` / `ui/`
+
+**關鍵數字**（出自 Config，禁止 Magic Number）：
+- 令牌桶限流：20 RPM；Token 預算：1,000,000 / Session；蒸餾觸發：+50,000 token 增量
+- 記憶單檔上限：2,000 token；loop_state.md 上限：50 行 / 2KB
+
+
 ## 文件索引
 
 | 檔案 | 內容 |
@@ -66,13 +83,4 @@
 
 > 工程備註：WASM 沙盒選用 `wasmi`（純 Rust 直譯器）而非 `wasmtime`——對「執行不可信片段」而言，直譯器無 JIT 攻擊面、無系統依賴、編譯極輕，且空 Linker + fuel 即達完全隔離，較重量級 JIT 更契合本專案的高防禦與極速定位。UniFFI 採官方現行 proc-macro 法，`agnes.udl` 作為等價介面定義文件並存。多資料夾並行與多模態已於 v0.8.1 接入 GUI 即時流程（`handle_send`）：App 級共享令牌桶（`AppState.rate_limiter`）讓並行的多資料夾代理與多模態呼叫共用同一 20 RPM 桶；視覺意圖（`is_visual_intent`）觸發圖片生成並回貼聊天——端點 `POST /v1/images/generations` 已實測回真實圖片 URL（~40–50s/張，故 `multimodal.timeout_seconds` 預設 180s；影片端點為單數 `/v1/video/generations`）。安全紅隊測試見 `tests/red_team.rs`（D2–D8 + WASM 隔離，17/17，0 穿透）。
 
-## 鋼鐵戒律（全專案不可違反）
-
-1. 說明文件一律進 `Docs/`；代理規則一律 `.toon` 格式進 `.agent/rules/`
-2. 金鑰只存在 `config.local.toml`（已在 .gitignore），任何 `.rs` 出現 `sk-` 開頭字串 = 一票否決
-3. 不信任模型口頭報告：Exit Code == 0 且 stderr 為空才算成功
-4. 進度狀態只信 SQLite（`agnes_state.db`），不信對話上下文
-5. Shell 執行前必先語系校準（`locale.rs`）
-6. 零 Magic Number：所有數值進 `Config` 結構體（`config.rs`）
-7. 修正階段只輸出 Git Diff 增量，未變更代碼不重複輸出
-8. 寫檔前必過驗證管線（見 03 與 `.agent/rules/verification.toon`）
+> **鋼鐵戒律**：見 `AGENTS.md`（唯一規範來源），此處不重複。

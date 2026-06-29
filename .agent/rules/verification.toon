@@ -1,9 +1,10 @@
-@struct Verification version:2 format:toon
+@struct Verification version:3 format:toon
 @struct
   description: 寫檔前驗證管線 + QA 自修正迴圈 合併 cross_validation + qa_validation
   mode: on-demand
   doc: Docs/03_QA_AUTOPILOT.md
-  supersedes: cross_validation.toon, qa_validation.toon
+  note: 已整合自舊版 cross_validation.toon / qa_validation.toon
+  LOAD_GATE: "僅在以下情況載入：(1) 寫檔前必過驗證管線；(2) 修改 QA、24道驗證閘門本身；(3) 修改 agent.rs / orchestrator.rs 的審查流程。"
 
 @struct DeterministicGates
   description: 第一層 確定性驗證 0 token 全過才考慮語意層
@@ -31,7 +32,7 @@
     - FactHallucinationAuditor: 變更摘要 vs 實際 diff 交叉比對 聲稱與實作不符即 REJECT veto:true
 
 @struct ExitCodeAlignment
-  description: 第三層 沙盒硬性對齊 執行後
+  description: 第三層 驗證管線層的沙盒硬性對齊（執行時沙盒層見 security.toon#SandboxExitCode）
   rules:
     - Exit Code == 0 且 stderr 為空才判定成功
     - 模型聲稱成功但 Exit Code != 0 判定虛假回報 攔截並砸回真實 Stderr

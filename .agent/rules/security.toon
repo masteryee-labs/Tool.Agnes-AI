@@ -1,9 +1,10 @@
-@struct Security version:2 format:toon
+@struct Security version:3 format:toon
 @struct
   description: 零信任安全策略 金鑰隔離 沙盒對齊 確認閘門 語系校準 OWASP 對齊
   mode: on-demand
   doc: Docs/05_SECURITY_MODEL.md
-  supersedes: security_policies.toon, confirmation_gate.toon, core.agents.toon (Security 段)
+  note: 已整合自舊版 security_policies.toon / confirmation_gate.toon / core.agents.toon
+  LOAD_GATE: "僅在以下情況載入：(1) 修改 sandbox.rs / config.rs / locale.rs；(2) 安全審查任務；(3) 金鑰/沙盒/確認閘相關任務。"
 
 @struct KeyIsolation
   description: API Key 絕對禁止硬編碼
@@ -16,14 +17,13 @@
     - 違反者一票否決
 
 @struct SandboxExitCode
-  description: 沙盒 Exit Code 硬性對齊 零虛假回報
+  description: 執行時沙盒 Exit Code 硬性對齊（驗證管線層見 verification.toon#ExitCodeAlignment）
   rules:
     - Exit Code == 0 且 stderr.is_empty() 才判定成功
     - 模型回報成功但 Exit Code != 0 判定虛假回報
     - 自動攔截並將真實 Stderr 砸回主編排官
     - 觸發自愈懲罰循環
     - 所有代碼執行必須在隔離沙盒中進行
-    - 沙盒隔離必須實作 Exit Code 與 Stderr 硬性擷取
     - 禁止信任大模型口頭報告
 
 @struct DeterministicState
