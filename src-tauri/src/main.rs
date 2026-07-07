@@ -1,6 +1,6 @@
 #![windows_subsystem = "windows"]
 
-//! Agnes AI v0.8.3 — Native Rust GUI (egui/wgpu, zero Chromium)
+//! Agnes AI v0.8.4 — Native Rust GUI (egui/wgpu, zero Chromium)
 //! Layout: Left sidebar (nav/projects) | Central (chat/input) | Right (22-agent panel + token budget)
 
 mod ui_chat;
@@ -1003,11 +1003,21 @@ impl AgnesApp {
                 }) as usize;
             }
             2 => {
-                // 目前金鑰以遮罩顯示（頭 5 尾 4），使用者才確認得了「存進去的是哪把」
-                let key_state_line = if cfg.api.key.is_empty() {
+                // 金鑰組顯示：多 Key 時列指紋清單，單 Key 時遮罩顯示，無金鑰時提示未設定
+                let all_keys = cfg.api.all_keys();
+                let key_state_line = if all_keys.is_empty() {
                     t("api_key_not_set", lang)
+                } else if all_keys.len() > 1 {
+                    // 多金鑰組：顯示數量 + 各指紋
+                    let fps: Vec<String> = all_keys.iter()
+                        .map(|k| app_lib::key_persistence::hash_key(k)[..8].to_string())
+                        .collect();
+                    let group_label = if lang == "zh-TW" { "金鑰組" } else { "Key group" };
+                    format!("{}：{} 組（指紋 {}）", group_label, all_keys.len(), fps.join(", "))
                 } else {
-                    let chars: Vec<char> = cfg.api.key.chars().collect();
+                    // 單金鑰：遮罩（頭 5 尾 4）+ 指紋
+                    let single = &all_keys[0];
+                    let chars: Vec<char> = single.chars().collect();
                     let masked = if chars.len() > 12 {
                         format!(
                             "{}…{}",
@@ -1017,7 +1027,7 @@ impl AgnesApp {
                     } else {
                         "•".repeat(chars.len())
                     };
-                    let fingerprint = app_lib::key_persistence::hash_key(&cfg.api.key)[..8].to_string();
+                    let fingerprint = app_lib::key_persistence::hash_key(single)[..8].to_string();
                     format!(
                         "{}：{}（{}）",
                         t("api_key_current", lang),
@@ -1026,27 +1036,61 @@ impl AgnesApp {
                     )
                 };
                 let saved_feedback = st.api_key_saved_feedback;
+                let group_hint = if lang == "zh-TW" {
+                    "可貼單把（sk-…）或多把以逗號/換行分隔（sk-a, sk-b, sk-c）→ 自動建為金鑰組輪詢"
+                } else {
+                    "Paste one key (sk-…) or multiple separated by comma/newline (sk-a, sk-b, sk-c) → auto key group rotation"
+                };
                 shown += settings_row(
                     ui, &search, &t("api_key", lang),
-                    &format!("{}\n{}", t("api_key_desc", lang), key_state_line),
+                    &format!("{}\n{}\n{}", t("api_key_desc", lang), key_state_line, group_hint),
                     |ui| {
                         if ui.button(t("save", lang)).clicked() && !st.api_key_input.trim().is_empty() {
-                            cfg.api.key = st.api_key_input.trim().to_string();
-                            st.api_key_input.clear();
-                            st.api_key_saved_feedback = true;
-                            cfg_changed = true;
+                            // 解析輸入：逗號或換行分隔 → 金鑰組；單把則退化為單元素組
+                            let parsed: Vec<String> = st.api_key_input
+                                .split([',', '\n', '\r'])
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if !parsed.is_empty() {
+                                cfg.api.keys = parsed.clone();
+                                // 同步首把到 key 欄（向後相容舊讀取路徑）
+                                cfg.api.key = parsed[0].clone();
+                                st.api_key_input.clear();
+                                st.api_key_saved_feedback = true;
+                                cfg_changed = true;
+                            }
                         }
                         ui.add(
                             egui::TextEdit::singleline(&mut st.api_key_input)
                                 .password(true)
-                                .hint_text("sk-…")
-                                .desired_width(170.0),
+                                .hint_text("sk-…  或  sk-a, sk-b, sk-c")
+                                .desired_width(220.0),
                         );
                         if saved_feedback {
                             ui.label(
                                 egui::RichText::new(t("api_key_saved_ok", lang))
                                     .color(ACCENT_GREEN).size(14.0).strong(),
                             );
+                        }
+                    },
+                ) as usize;
+
+                // 金鑰組輪詢間隔（每把 Key 連續使用幾次後輪替）
+                shown += settings_row(
+                    ui, &search,
+                    if lang == "zh-TW" { "金鑰輪詢間隔" } else { "Key rotation every" },
+                    if lang == "zh-TW" {
+                        "每把 Key 連續使用 N 次後自動換下一把（0=預設 15）。多帳號方案核心：把流量分散到所有帳號避免觸及速率上限"
+                    } else {
+                        "Rotate to next key after N consecutive calls (0=default 15). Core of multi-account: spread load across accounts to avoid rate limits"
+                    },
+                    |ui| {
+                        let mut v = cfg.api.key_rotation_every as i32;
+                        let resp = ui.add(egui::DragValue::new(&mut v).range(0..=200).speed(1));
+                        if resp.changed() {
+                            cfg.api.key_rotation_every = v.max(0) as u32;
+                            cfg_changed = true;
                         }
                     },
                 ) as usize;
@@ -1836,11 +1880,14 @@ impl AgnesApp {
                 *s = AgentExecutionState::Running(std::time::Instant::now());
             }
 
-            let mut agent_loop = AgentLoop::with_rate_limiter(
-                config.lock().unwrap().clone(),
-                workspace_path,
-                app_state_task.rate_limiter.clone(),
-            );
+            let mut agent_loop = {
+                let cfg = config.lock().unwrap().clone();
+                let rl = app_state_task.rate_limiter.clone();
+                match app_state_task.key_rotator.clone() {
+                    Some(kr) => AgentLoop::with_rate_limiter_and_rotator(cfg, workspace_path, rl, kr),
+                    None => AgentLoop::with_rate_limiter(cfg, workspace_path, rl),
+                }
+            };
             // 寫檔自動記入 file_changes（變更面板資料來源）
             agent_loop.set_conversation_id(&conversation_id);
             let mut messages = Vec::new();
@@ -1929,11 +1976,12 @@ impl AgnesApp {
                 let extra_loops: Vec<AgentLoop> = extra_folders
                     .iter()
                     .map(|f| {
-                        let mut al = AgentLoop::with_rate_limiter(
-                            config.lock().unwrap().clone(),
-                            f.clone(),
-                            app_state_task.rate_limiter.clone(),
-                        );
+                        let cfg = config.lock().unwrap().clone();
+                        let rl = app_state_task.rate_limiter.clone();
+                        let mut al = match app_state_task.key_rotator.clone() {
+                            Some(kr) => AgentLoop::with_rate_limiter_and_rotator(cfg, f.clone(), rl, kr),
+                            None => AgentLoop::with_rate_limiter(cfg, f.clone(), rl),
+                        };
                         al.set_conversation_id(&conversation_id);
                         al
                     })
@@ -1975,35 +2023,40 @@ impl AgnesApp {
 
             // ── 多模態：偵測到視覺意圖則生成圖片，結果附加顯示（共用令牌桶，計入 20 RPM）──
             if !aborted && app_lib::is_visual_intent(&prompt) {
-                let (mm_cfg, api_key) = {
+                let key_rotator = {
                     let c = config.lock().unwrap();
-                    (c.multimodal.clone(), c.api.key.clone())
+                    // 優先使用 App 級共享輪詢器；無則退回 config 自建（單 Key 退化）
+                    app_state_task.key_rotator.clone().or_else(|| c.api.build_rotator())
                 };
-                let mgr = app_lib::MultimodalManager::new(mm_cfg, api_key);
-                let body = match mgr
-                    .generate_image(&app_state_task.rate_limiter, &prompt)
-                    .await
-                {
-                    Ok(media) => {
-                        if let Some(u) = media.url {
-                            format!("[多模態] 已生成圖片：{}", u)
-                        } else if media.b64.is_some() {
-                            "[多模態] 已生成圖片（base64 內嵌回應）".to_string()
-                        } else {
-                            "[多模態] 已收到回應但無圖片資料".to_string()
+                if let Some(kr) = key_rotator {
+                    let mm_cfg = config.lock().unwrap().multimodal.clone();
+                    let mgr = app_lib::MultimodalManager::new(mm_cfg, kr);
+                    let body = match mgr
+                        .generate_image(&app_state_task.rate_limiter, &prompt)
+                        .await
+                    {
+                        Ok(media) => {
+                            if let Some(u) = media.url {
+                                format!("[多模態] 已生成圖片：{}", u)
+                            } else if media.b64.is_some() {
+                                "[多模態] 已生成圖片（base64 內嵌回應）".to_string()
+                            } else {
+                                "[多模態] 已收到回應但無圖片資料".to_string()
+                            }
                         }
+                        Err(e) => format!("[多模態] 圖片生成未完成：{}", e),
+                    };
+                    if let Ok(conn) = app_lib::open_connection(&app_state_task.db_path) {
+                        let _ = app_lib::add_conversation_message(
+                            &conn, &conversation_id, "tool", &body,
+                        );
                     }
-                    Err(e) => format!("[多模態] 圖片生成未完成：{}", e),
-                };
-                if let Ok(conn) = app_lib::open_connection(&app_state_task.db_path) {
-                    let _ =
-                        app_lib::add_conversation_message(&conn, &conversation_id, "tool", &body);
+                    ui_state
+                        .lock()
+                        .unwrap()
+                        .active_messages
+                        .push(ChatMessage { role: "tool".into(), content: body });
                 }
-                ui_state
-                    .lock()
-                    .unwrap()
-                    .active_messages
-                    .push(ChatMessage { role: "tool".into(), content: body });
             }
 
             if !aborted {
@@ -2345,13 +2398,24 @@ impl AgnesApp {
             }
 
             // 建構 AutonomousLoop
-            let loop_engine = app_lib::AutonomousLoop::new(
-                config.lock().unwrap().clone(),
-                std::path::PathBuf::from(&workspace_path),
-                app_state_task.rate_limiter.clone(),
-                goal_id.clone(),
-                goal.clone(),
-            );
+            let loop_engine = {
+                let cfg = config.lock().unwrap().clone();
+                let rl = app_state_task.rate_limiter.clone();
+                let kr = app_state_task.key_rotator.clone()
+                    .or_else(|| cfg.api.build_rotator())
+                    .unwrap_or_else(|| {
+                        app_lib::KeyRotator::new(vec!["__no_key__".to_string()], 15)
+                            .expect("fallback rotator")
+                    });
+                app_lib::AutonomousLoop::new(
+                    cfg,
+                    std::path::PathBuf::from(&workspace_path),
+                    rl,
+                    kr,
+                    goal_id.clone(),
+                    goal.clone(),
+                )
+            };
 
             // 複製 state Arc 供即時更新 UI
             let loop_state_arc = loop_engine.state.clone();

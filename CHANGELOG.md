@@ -4,6 +4,23 @@ All notable changes to Agnes AI are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.4] - 2026-07-07
+
+Theme: multi-account API key rotation to keep Agnes AI fully free without hitting any single account's 20 RPM rate limit.
+
+### Added
+- **Multi-API-Key rotation** (`src-tauri/src/key_rotation.rs`): `KeyRotator` rotates across multiple account keys — count-based rotation (after `key_rotation_every` consecutive calls, defaults to 15) plus forced key switch on HTTP 420/429 (jumps to the next key immediately instead of waiting out the backoff). Single-key mode degrades to the legacy behavior (backward compatible).
+- **Config**: `[api] keys = ["sk-a", "sk-b", "sk-c"]` (key group, takes precedence over `key` when non-empty) + `key_rotation_every` (rotation threshold, 0 = default 15). `ApiConfig::all_keys()` / `has_key()` / `build_rotator()` helpers.
+- **App-global shared rotator**: `AppState.key_rotator` is a single shared rotator for all agents, multi-folder parallel loops, sub-agents (Planner/Generator/Evaluator), and multimodal — load is spread evenly across all accounts.
+- **GUI**: the API key input now accepts one key (`sk-…`) or multiple separated by comma/newline (`sk-a, sk-b, sk-c`) → auto-built into the `keys` group; multi-key state shows "金鑰組：N 組（指紋 a, b, c）"; new "金鑰輪詢間隔" DragValue.
+- **Wiring**: `AgentLoop::with_rate_limiter_and_rotator`, `MultimodalManager::new(cfg, rotator)`, `MemoryManager::{llm_call, stage12_merged, distill_text}` all take the shared rotator; `send_api_request` calls `mark_rate_limited()` on 429/420.
+
+### Security
+- Multiple keys are still stored only in `config.local.toml` (gitignored); UI/logs show per-key SHA-256 fingerprints, never raw keys; keys never enter model context. Verified: `config.local.toml` is untracked, not staged, and matched by `.gitignore:7`.
+
+### Gates
+- `cargo check --all-targets` clean; `cargo clippy -D warnings` clean; `cargo test --lib` green (147 tests, including 7 new KeyRotator tests).
+
 ## [0.8.1] - 2026-06-14
 
 Theme: wire the parallel + multimodal capabilities into the live GUI, and add a red-team gate suite.

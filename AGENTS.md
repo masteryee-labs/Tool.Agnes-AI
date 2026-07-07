@@ -8,7 +8,7 @@
 
 - **技術棧**：Rust + eframe/egui 原生 GUI，零 Chromium/WebView2，預留 UniFFI 行動端
 - **目標**：無限上下文分層記憶、0 虛假回報、0 遺忘、零信任防禦的自主代理
-- **程式碼位置**：`src-tauri/src/`（目錄名保留 tauri 慣例但**不使用 Tauri 框架**）；狀態：`agnes_state.db`（SQLite）；金鑰：`config.local.toml`
+- **程式碼位置**：`src-tauri/src/`（目錄名保留 tauri 慣例但**不使用 Tauri 框架**）；狀態：`agnes_state.db`（SQLite）；金鑰：`config.local.toml`（支援多 Key 組 `keys` + `key_rotation_every` 輪詢，見 `key_rotation.rs`）
 - **當前 Phase**：Phase 0–5 已全數完成（22 代理、真子代理、egui UI、無視窗執行、Loop Engine）
 - **架構定位**：Harness Engineering（Guides×Sensors）+ Loop Engineering（5 階段迴圈）已實作
 

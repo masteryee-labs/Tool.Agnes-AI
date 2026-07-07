@@ -22,6 +22,17 @@
 - 日誌與 UI 僅顯示 `hash_key` 後的指紋
 - prompt 中金鑰一律 `{{API_KEY}}` 佔位符，送出前由 Rust 端替換——金鑰永不進入模型上下文
 
+## 多 API Key 輪詢（已實作，key_rotation.rs）
+
+Agnes AI 免費方案每帳號有獨立速率上限（20 RPM）。使用者可註冊多個帳號、各別取得 API Key，在這些 Key 之間輪詢以盡量不觸及任一帳號上限：
+
+- **組態**：`[api] keys = ["sk-a", "sk-b", "sk-c"]`（金鑰組，非空時優先於 `key`）+ `key_rotation_every = 15`（每把 Key 連續使用 N 次後輪替，0=預設 15）
+- **計數輪詢**：`KeyRotator::next_key()` 每次回傳目前 Key 並累加計數，達閾值自動切下一把——流量平均分散到所有帳號
+- **429 強制換 Key**：`send_api_request` 收到 420/429 時呼叫 `mark_rate_limited()` 立即跳下一把 Key 重試，不必乾等退避（多帳號方案核心收益）
+- **單 Key 退化**：只有一把 Key 時不輪詢，行為等同舊版，向後相容
+- **共享範圍**：`AppState.key_rotator` 為 App 級單一共享輪詢器，所有 Agent / 多資料夾並行 / 子代理（Planner/Generator/Evaluator）/ 多模態共用同一計數，流量在所有帳號間均勻分散
+- **安全不變**：多把金鑰同樣只存 `config.local.toml`（gitignore），UI/日誌只顯示各別指紋，永不進入模型上下文
+
 ## 沙盒規格
 
 | 層級 | 機制 | 狀態 |

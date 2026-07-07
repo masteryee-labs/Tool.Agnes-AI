@@ -45,15 +45,15 @@ pub fn build_video_request(model: &str, prompt: &str) -> serde_json::Value {
     })
 }
 
-/// 多模態媒體管理器。持有端點/模型組態與 API key；HTTP client 與 rate_limiter 由呼叫端注入。
+/// 多模態媒體管理器。持有端點/模型組態與共享金鑰輪詢器；HTTP client 與 rate_limiter 由呼叫端注入。
 pub struct MultimodalManager {
     cfg: MultimodalConfig,
-    api_key: String,
+    key_rotator: std::sync::Arc<crate::key_rotation::KeyRotator>,
 }
 
 impl MultimodalManager {
-    pub fn new(cfg: MultimodalConfig, api_key: String) -> Self {
-        Self { cfg, api_key }
+    pub fn new(cfg: MultimodalConfig, key_rotator: std::sync::Arc<crate::key_rotation::KeyRotator>) -> Self {
+        Self { cfg, key_rotator }
     }
 
     /// 生成圖片（Agnes Image 2.1 Flash）。共用 rate_limiter，計入 20 RPM。
@@ -85,9 +85,6 @@ impl MultimodalManager {
         payload: &serde_json::Value,
         kind: &str,
     ) -> Result<MediaResult, String> {
-        if self.api_key.is_empty() {
-            return Err("API key 未設定，無法呼叫多模態服務。".to_string());
-        }
         // 媒體生成耗時（實測 Agnes Image 單張 ~50s），用專屬長逾時客戶端，
         // 不可沿用文字/工具用的 30s 短逾時池，否則必逾時失敗。
         let client = reqwest::Client::builder()
@@ -95,9 +92,10 @@ impl MultimodalManager {
             .build()
             .map_err(|e| format!("無法初始化多模態 HTTP 客戶端: {}", e))?;
         limiter.acquire().await; // 計入全域 20 RPM 令牌桶
+        let api_key = self.key_rotator.next_key().map_err(|e| format!("API key 未設定，無法呼叫多模態服務: {}", e))?;
         let res = client
             .post(endpoint)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", api_key))
             .json(payload)
             .send()
             .await
@@ -155,9 +153,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_key_rejected() {
-        let mgr = MultimodalManager::new(MultimodalConfig::default(), String::new());
-        let limiter = RateLimiter::new(20);
-        let r = mgr.generate_image(&limiter, "x").await;
-        assert!(r.is_err());
+        // 無金鑰時 build_rotator 回 None，模擬呼叫端無法建構 MultimodalManager。
+        // 此測試改驗證 KeyRotator::new 對空集合回 None。
+        assert!(crate::key_rotation::KeyRotator::new(Vec::new(), 15).is_none());
+        // 確保 rate_limiter 仍可正常建構（不影響其他路徑）
+        let _limiter = RateLimiter::new(20);
     }
 }

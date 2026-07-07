@@ -17,7 +17,8 @@
 ```
 main.rs          eframe 進入點，視窗初始化
 lib.rs           模組匯出與共用入口
-config.rs        Config{api, sandbox, security, general, mcp} 全組態 + 金鑰讀寫 + ensure_gitignore
+config.rs        Config{api, sandbox, security, general, mcp} 全組態 + 金鑰讀寫 + ensure_gitignore + 多 Key 組（keys/key_rotation_every）
+key_rotation.rs  多 API Key 輪詢器：計數輪詢 + 429 強制換 Key（多帳號免費方案避限速）
 locale.rs        OS 語系探針：Windows chcp 65001 / Unix LANG=zh_TW.UTF-8
 db.rs            SQLite 狀態機：tasks / execution_logs / audit_logs / projects / conversations / goals / sub_agent_runs
 sandbox.rs       零信任執行：引數消毒、白黑名單、路徑圈禁、run_in_sandbox(ExitCode+Stderr)

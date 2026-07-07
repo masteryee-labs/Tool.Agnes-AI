@@ -15,10 +15,10 @@
 - 金鑰隔離：`config.local.toml`，禁止硬編碼 `sk-` 前綴
 
 **已完成模組**（禁止重複實作）：
-`orchestrator.rs` / `agent.rs` / `sandbox.rs` / `db.rs` / `config.rs` / `locale.rs` / `mcp.rs` / `memory.rs` / `rate_limiter.rs` / `parallel.rs` / `multimodal.rs` / `mobile.rs` / `loop_engine.rs` / `sub_agent.rs` / `worktree.rs` / `ui/`
+`orchestrator.rs` / `agent.rs` / `sandbox.rs` / `db.rs` / `config.rs` / `key_rotation.rs` / `locale.rs` / `mcp.rs` / `memory.rs` / `rate_limiter.rs` / `parallel.rs` / `multimodal.rs` / `mobile.rs` / `loop_engine.rs` / `sub_agent.rs` / `worktree.rs` / `ui/`
 
 **關鍵數字**（出自 Config，禁止 Magic Number）：
-- 令牌桶限流：20 RPM；Token 預算：1,000,000 / Session；蒸餾觸發：+50,000 token 增量
+- 令牌桶限流：20 RPM（每帳號）；多 Key 輪詢：每把連續 15 次後換下一把（`key_rotation_every`）；Token 預算：1,000,000 / Session；蒸餾觸發：+50,000 token 增量
 - 記憶單檔上限：2,000 token；loop_state.md 上限：50 行 / 2KB
 
 
@@ -56,6 +56,7 @@
 - `skills.rs` — Claude 互通層：`.claude/skills/*/SKILL.md` 技能、`CLAUDE.md` 規則、`.mcp.json` MCP 設定的確定性解析與系統提示注入
 - `memory.rs` — 滑動視窗分塊 + 三階段漏斗 RAG + FTS5 索引；Stage 0 本機記憶查詢命中即跳過檢索 API，Stage 1+2 已合併為單次呼叫
 - `rate_limiter.rs` — 全域共享令牌桶限流器：把關每一個 Agnes API 呼叫，20 RPM 上限、`acquire()` 等待補充而非拒絕、429 倍率式指數退避；`max_rpm = 0` 可停用上限（測試用）
+- `key_rotation.rs` — 多 API Key 輪詢器：在多帳號金鑰間計數輪詢（每把連續 N 次後換下一把）+ 429/420 強制換 Key，避免單帳號觸及免費方案速率上限；單 Key 退化為舊版行為
 - `parallel.rs` — DAG 分層並行原語：`compute_dag_layers`（Kahn 拓樸、偵測環）+ `run_layers_parallel`（同層 tokio JoinSet 並行、確定性還原）；`dispatch_subagents` 改用分層、`execute_multi_folder_parallel` 多資料夾並行建構
 - `multimodal.rs` — MultimodalMediaSpecialist（動態激活）：Agnes Image 2.1 Flash / Video V2.0 客戶端，`is_visual_intent` 確定性意圖偵測，媒體呼叫共用 rate_limiter
 - `mobile.rs` + `agnes.udl` — UniFFI 行動端綁定（`--features mobile`）：版本、組態摘要、視覺意圖、token 估算等確定性 API 匯出供 iOS/Android 殼層

@@ -279,31 +279,56 @@ pub struct AgentLoop {
     pub current_conversation_id: Option<String>,
     /// 令牌桶速率限制器，共享於同一 AgentLoop 的所有 API 呼叫。
     rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
+    /// 多 API Key 輪詢器：在多帳號金鑰間計數輪詢 + 429 強制換 Key。
+    /// `None` = 未設定任何金鑰（run_step 會直接回錯）。
+    key_rotator: Option<Arc<crate::key_rotation::KeyRotator>>,
 }
 
 impl AgentLoop {
     pub fn new(config: Config, workspace_path: String) -> Self {
         let max_rpm = config.api.max_rpm;
+        let key_rotator = config.api.build_rotator();
         Self {
             rate_limiter: Arc::new(crate::rate_limiter::RateLimiter::new(max_rpm)),
             config,
             workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
             current_conversation_id: None,
+            key_rotator,
         }
     }
 
     /// 以外部共享的令牌桶建構（App 級單一 20 RPM 桶）。多資料夾並行 / 多模態
     /// 同時觸發時，所有 AgentLoop 共用同一限流器，總請求率仍受 20 RPM 約束。
+    /// 金鑰輪詢器由 config 自行建構（各 AgentLoop 獨立計數）。
     pub fn with_rate_limiter(
         config: Config,
         workspace_path: String,
         rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
+    ) -> Self {
+        let key_rotator = config.api.build_rotator();
+        Self {
+            rate_limiter,
+            config,
+            workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
+            current_conversation_id: None,
+            key_rotator,
+        }
+    }
+
+    /// 以外部共享的令牌桶 + 金鑰輪詢器建構（App 級單一共享）。
+    /// 多資料夾並行 / 子代理 / 多模態共用同一輪詢器，流量在所有帳號間均勻分散。
+    pub fn with_rate_limiter_and_rotator(
+        config: Config,
+        workspace_path: String,
+        rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
+        key_rotator: Arc<crate::key_rotation::KeyRotator>,
     ) -> Self {
         Self {
             rate_limiter,
             config,
             workspace_path: normalize_workspace(PathBuf::from(workspace_path)),
             current_conversation_id: None,
+            key_rotator: Some(key_rotator),
         }
     }
 
@@ -398,10 +423,10 @@ impl AgentLoop {
         token_budgeter: &tokio::sync::Mutex<crate::TokenBudgeter>,
         db_path: &std::path::Path,
     ) -> Result<AgentStep, String> {
-        let api_key = &self.config.api.key;
-        if api_key.is_empty() {
-            return Err("API key 未設定，無法連接 API 服務。".to_string());
-        }
+        let key_rotator = match &self.key_rotator {
+            Some(r) => r.clone(),
+            None => return Err("API key 未設定，無法連接 API 服務。".to_string()),
+        };
 
         if token_budgeter.lock().await.is_locked() {
             return Err("Token budget exceeded! Session budget has been locked.".to_string());
@@ -443,7 +468,7 @@ impl AgentLoop {
 
             if !bypassed {
                 // Stage 1+2 合併為一次 API 呼召（2 RPM → 1 RPM）；令牌由 stage12_merged 內部統一獲取
-                if let Ok(files) = memory_manager.stage12_merged(&client, &self.rate_limiter, &api_url, api_key, &self.config.model_routing.low, last_user_prompt, &self.config.memory).await {
+                if let Ok(files) = memory_manager.stage12_merged(&client, &self.rate_limiter, &api_url, &key_rotator, &self.config.model_routing.low, last_user_prompt, &self.config.memory).await {
                     rag_context = memory_manager.stage3_inject_contents(&files);
                 }
             }
@@ -544,7 +569,7 @@ impl AgentLoop {
                 "temperature": 0.2,
             });
 
-            let res_json = self.send_api_request(&client, &api_url, api_key, &payload).await?;
+            let res_json = self.send_api_request(&client, &api_url, &key_rotator, &payload).await?;
 
             let usage = &res_json["usage"];
             let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
@@ -693,7 +718,7 @@ impl AgentLoop {
                     // 蒸餾 await 階段不持有 SQLite 連線（Connection 非 Sync）；
                     // 令牌桶共用同一 rate_limiter，alpha/beta/integrator 連發也受 20 RPM 約束
                     match memory_manager.distill_text(
-                        &client, &self.rate_limiter, &api_url, api_key, &self.config.model_routing.low,
+                        &client, &self.rate_limiter, &api_url, &key_rotator, &self.config.model_routing.low,
                         &conversation_text, &self.config.memory,
                     ).await {
                         Ok(distilled) => {
@@ -782,12 +807,13 @@ impl AgentLoop {
     }
 
     /// 帶速率限制與指數退避重試的 API 請求包裝。
-    /// 420/429 速率超限時，依 config 設定等待後重試，最多 retry_max_attempts 次。
+    /// 420/429 速率超限時：先 `mark_rate_limited` 立即換下一把 Key（多帳號方案核心），
+    /// 再依 config 設定等待後重試，最多 retry_max_attempts 次。
     async fn send_api_request(
         &self,
         client: &reqwest::Client,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &Arc<crate::key_rotation::KeyRotator>,
         payload: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
         let mut clean_payload = payload.clone();
@@ -795,6 +821,8 @@ impl AgentLoop {
         let mut backoff = self.config.api.retry_initial_backoff_secs;
         for attempt in 0..self.config.api.retry_max_attempts {
             self.rate_limiter.acquire().await;
+            // 每次送出都向輪詢器取一把 Key（計數輪詢會在閾值時自動換下一把）
+            let api_key = key_rotator.next_key().map_err(|e| e.to_string())?;
 
             let res = match client
                 .post(api_url)
@@ -822,7 +850,16 @@ impl AgentLoop {
 
             let status = res.status();
 
-            if status.as_u16() == 429 {
+            if status.as_u16() == 429 || status.as_u16() == 420 {
+                // 多帳號方案核心收益：立即換下一把 Key，避免乾等退避
+                if !key_rotator.is_single() {
+                    key_rotator.mark_rate_limited();
+                    eprintln!(
+                        "[AgentLoop] 速率限制（{}）：已切換到下一把 API Key（指紋 {}）重試",
+                        status.as_u16(),
+                        key_rotator.current_fingerprint()
+                    );
+                }
                 if attempt + 1 < self.config.api.retry_max_attempts {
                     tokio::time::sleep(Duration::from_secs(backoff)).await;
                     backoff = ((backoff as f64) * self.config.api.retry_backoff_multiplier)
@@ -830,7 +867,8 @@ impl AgentLoop {
                     continue;
                 }
                 return Err(format!(
-                    "API 速率限制（429）：已重試 {} 次仍無法送出，請稍後再試",
+                    "API 速率限制（{}）：已重試 {} 次仍無法送出，請稍後再試",
+                    status.as_u16(),
                     attempt + 1
                 ));
             }

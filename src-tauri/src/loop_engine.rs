@@ -117,6 +117,9 @@ pub struct AutonomousLoop {
     pub config: Config,
     pub workspace_path: PathBuf,
     pub rate_limiter: Arc<RateLimiter>,
+    /// 共享多 API Key 輪詢器：所有子代理（Planner/Generator/Evaluator）共用，
+    /// 在多帳號金鑰間計數輪詢 + 429 強制換 Key。
+    pub key_rotator: Arc<crate::key_rotation::KeyRotator>,
     pub goal_id: String,
     /// 迴圈狀態快照（供 UI 即時讀取）
     pub state: Arc<Mutex<LoopState>>,
@@ -136,6 +139,7 @@ impl AutonomousLoop {
         config: Config,
         workspace_path: PathBuf,
         rate_limiter: Arc<RateLimiter>,
+        key_rotator: Arc<crate::key_rotation::KeyRotator>,
         goal_id: String,
         goal_description: String,
     ) -> Self {
@@ -156,6 +160,7 @@ impl AutonomousLoop {
             config,
             workspace_path,
             rate_limiter,
+            key_rotator,
             goal_id,
             state: Arc::new(Mutex::new(state)),
         }
@@ -369,6 +374,7 @@ impl AutonomousLoop {
             self.config.clone(),
             self.workspace_path.to_string_lossy().to_string(),
             self.rate_limiter.clone(),
+            self.key_rotator.clone(),
             conv_id.clone(),
             None,
         );
@@ -461,6 +467,7 @@ impl AutonomousLoop {
             self.config.clone(),
             work_path.clone(),
             self.rate_limiter.clone(),
+            self.key_rotator.clone(),
             gen_conv.clone(),
             worktree_handle.as_ref().map(|h| h.path.clone()),
         );
@@ -470,6 +477,7 @@ impl AutonomousLoop {
             self.config.clone(),
             self.workspace_path.to_string_lossy().to_string(),
             self.rate_limiter.clone(),
+            self.key_rotator.clone(),
             eval_conv.clone(),
             None,
         );
@@ -675,6 +683,7 @@ mod tests {
             Config::default(),
             PathBuf::from("."),
             Arc::new(RateLimiter::new(20)),
+            crate::key_rotation::KeyRotator::new(vec!["test-key".to_string()], 15).unwrap(),
             "test-goal".to_string(),
             "test".to_string(),
         );

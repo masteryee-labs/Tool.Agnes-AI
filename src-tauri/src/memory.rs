@@ -270,12 +270,13 @@ impl MemoryManager {
     /// Single LLM call helper shared by funnel stages and distillation agents.
     /// 共用全域令牌桶：呼叫前先 acquire，確保記憶管線的每次 Agnes API 呼叫都
     /// 計入 20 RPM 上限，蒸餾組 alpha/beta/integrator 連發也不會突破限速觸發 429。
+    /// 金鑰由共享 `KeyRotator` 提供，每次呼叫取一把 Key（多帳號輪詢）。
     #[allow(clippy::too_many_arguments)]
     async fn llm_call(
         client: &reqwest::Client,
         limiter: &crate::rate_limiter::RateLimiter,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &std::sync::Arc<crate::key_rotation::KeyRotator>,
         model: &str,
         system_prompt: &str,
         user_msg: &str,
@@ -291,6 +292,7 @@ impl MemoryManager {
         });
 
         limiter.acquire().await;
+        let api_key = key_rotator.next_key().map_err(|e| e.to_string())?;
         let res = client.post(api_url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&payload)
@@ -319,7 +321,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         limiter: &crate::rate_limiter::RateLimiter,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &std::sync::Arc<crate::key_rotation::KeyRotator>,
         model: &str,
         user_prompt: &str,
     ) -> Result<Vec<String>, String> {
@@ -345,7 +347,7 @@ impl MemoryManager {
         let system_prompt = "你是一個領域/標籤篩選專家。請根據使用者的提示詞，從給定的標籤資料夾列表中選出最相關的標籤。\n必須僅回傳一個 JSON 格式的字串陣列，例如: [\"git\", \"rust\"]，不要有任何 Markdown 標記（如 ```json）或額外解釋。如果沒有相關標籤，回傳 []。";
         let user_msg = format!("使用者提示詞: {}\n標籤資料夾列表: {:?}", user_prompt, tag_folders);
 
-        let text = Self::llm_call(client, limiter, api_url, api_key, model, system_prompt, &user_msg, 0.1).await?;
+        let text = Self::llm_call(client, limiter, api_url, key_rotator, model, system_prompt, &user_msg, 0.1).await?;
 
         let parsed: Vec<String> = parse_json_string_array(&text);
 
@@ -364,7 +366,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         limiter: &crate::rate_limiter::RateLimiter,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &std::sync::Arc<crate::key_rotation::KeyRotator>,
         model: &str,
         user_prompt: &str,
         selected_tags: &[String],
@@ -396,7 +398,7 @@ impl MemoryManager {
         let system_prompt = "你是一個檔案篩選專家。請根據使用者的提示詞，從給定的 Markdown 檔案列表中選出最可能包含有用歷史記憶的檔案。\n必須僅回傳一個 JSON 格式的字串陣列，例如: [\"file1.md\", \"file2.md\"]，不要有任何 Markdown 標記（如 ```json）或額外解釋。如果沒有相關檔案，回傳 []。";
         let user_msg = format!("使用者提示詞: {}\n檔案列表: {:?}", user_prompt, file_names);
 
-        let text = Self::llm_call(client, limiter, api_url, api_key, model, system_prompt, &user_msg, 0.1).await?;
+        let text = Self::llm_call(client, limiter, api_url, key_rotator, model, system_prompt, &user_msg, 0.1).await?;
 
         let parsed: Vec<String> = parse_json_string_array(&text);
 
@@ -421,7 +423,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         limiter: &crate::rate_limiter::RateLimiter,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &std::sync::Arc<crate::key_rotation::KeyRotator>,
         model: &str,
         user_prompt: &str,
         cfg: &MemoryConfig,
@@ -474,6 +476,7 @@ impl MemoryManager {
             });
 
             limiter.acquire().await;
+            let api_key = key_rotator.next_key().map_err(|e| e.to_string())?;
             let res = client.post(api_url)
                 .header("Authorization", format!("Bearer {}", api_key))
                 .json(&payload)
@@ -555,7 +558,7 @@ impl MemoryManager {
         client: &reqwest::Client,
         limiter: &crate::rate_limiter::RateLimiter,
         api_url: &str,
-        api_key: &str,
+        key_rotator: &std::sync::Arc<crate::key_rotation::KeyRotator>,
         model: &str,
         conversation_text: &str,
         cfg: &MemoryConfig,
@@ -574,17 +577,17 @@ impl MemoryManager {
 
         // ContextDistillerAlpha 與 Beta 並行執行
         let distilled = if back.trim().is_empty() {
-            Self::llm_call(client, limiter, api_url, api_key, model, DISTILLER_PROMPT, &front, 0.1).await?
+            Self::llm_call(client, limiter, api_url, key_rotator, model, DISTILLER_PROMPT, &front, 0.1).await?
         } else {
             let (alpha, beta) = tokio::join!(
-                Self::llm_call(client, limiter, api_url, api_key, model, DISTILLER_PROMPT, &front, 0.1),
-                Self::llm_call(client, limiter, api_url, api_key, model, DISTILLER_PROMPT, &back, 0.1),
+                Self::llm_call(client, limiter, api_url, key_rotator, model, DISTILLER_PROMPT, &front, 0.1),
+                Self::llm_call(client, limiter, api_url, key_rotator, model, DISTILLER_PROMPT, &back, 0.1),
             );
             let alpha = alpha?;
             let beta = beta?;
             // DistillationIntegrator 重組
             let merged_input = format!("[前半段蒸餾]\n{}\n\n[後半段蒸餾]\n{}", alpha, beta);
-            Self::llm_call(client, limiter, api_url, api_key, model, INTEGRATOR_PROMPT, &merged_input, 0.1).await?
+            Self::llm_call(client, limiter, api_url, key_rotator, model, INTEGRATOR_PROMPT, &merged_input, 0.1).await?
         };
 
         // TokenOverlapAuditor 確定性審查（一票否決）

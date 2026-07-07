@@ -299,8 +299,8 @@ async fn main() {
 
     // 先載入組態（會向上尋找 config.local.toml），再準備 QA 工作區
     let mut config = Config::load().expect("無法載入 config.local.toml — 請先在 GUI 設定 API 金鑰");
-    if config.api.key.is_empty() {
-        eprintln!("[QA ABORT] API 金鑰為空");
+    if !config.api.has_key() {
+        eprintln!("[QA ABORT] API 金鑰為空（未設定 keys 組或單一 key）");
         std::process::exit(2);
     }
     // QA 模式：自動審查（工具直接執行，仍過 22-gate 驗證）+ 專案模式 + 延長 API 逾時

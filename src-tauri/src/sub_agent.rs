@@ -172,10 +172,16 @@ impl SubAgentInstance {
         config: Config,
         workspace_path: String,
         rate_limiter: Arc<RateLimiter>,
+        key_rotator: Arc<crate::key_rotation::KeyRotator>,
         conversation_id: String,
         worktree_path: Option<PathBuf>,
     ) -> Self {
-        let mut agent_loop = AgentLoop::with_rate_limiter(config, workspace_path, rate_limiter);
+        let mut agent_loop = AgentLoop::with_rate_limiter_and_rotator(
+            config,
+            workspace_path,
+            rate_limiter,
+            key_rotator,
+        );
         agent_loop.set_conversation_id(&conversation_id);
         Self {
             role,

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::memory::MemoryConfig;
@@ -208,6 +209,14 @@ pub struct ApiConfig {
     /// 每次退避的倍增因子
     #[serde(default = "default_retry_backoff_multiplier")]
     pub retry_backoff_multiplier: f64,
+    /// 多 API Key 組（不同帳號，速率上限各自獨立）。非空時優先於 `key`，
+    /// 由 `KeyRotator` 在這些 Key 間計數輪詢 + 429 強制換 Key，盡量不觸及任一
+    /// 帳號的免費方案速率上限。空時退化為單 Key（沿用 `key`）。
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// 每把 Key 連續使用幾次後輪到下一把（0 = 套用 `key_rotation::DEFAULT_ROTATE_EVERY`）。
+    #[serde(default = "default_key_rotation_every")]
+    pub key_rotation_every: u32,
 }
 
 fn default_session_budget() -> u64 { 500000 }
@@ -221,6 +230,7 @@ fn default_retry_initial_backoff() -> u64 { 3 }
 fn default_retry_max_backoff() -> u64 { 60 }
 fn default_retry_max_attempts() -> u32 { 5 }
 fn default_retry_backoff_multiplier() -> f64 { 2.0 }
+fn default_key_rotation_every() -> u32 { crate::key_rotation::DEFAULT_ROTATE_EVERY }
 
 impl Default for ApiConfig {
     fn default() -> Self {
@@ -237,7 +247,41 @@ impl Default for ApiConfig {
             retry_max_backoff_secs: default_retry_max_backoff(),
             retry_max_attempts: default_retry_max_attempts(),
             retry_backoff_multiplier: default_retry_backoff_multiplier(),
+            keys: Vec::new(),
+            key_rotation_every: default_key_rotation_every(),
         }
+    }
+}
+
+impl ApiConfig {
+    /// 解析實際可用的金鑰清單：`keys` 非空時優先，否則退化為單元素 `[key]`，
+    /// 兩者皆空時回傳空 Vec。去空白與空字串。
+    pub fn all_keys(&self) -> Vec<String> {
+        let from_keys: Vec<String> = self
+            .keys
+            .iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        if !from_keys.is_empty() {
+            return from_keys;
+        }
+        let single = self.key.trim().to_string();
+        if single.is_empty() {
+            Vec::new()
+        } else {
+            vec![single]
+        }
+    }
+
+    /// 是否已設定任一金鑰（`keys` 或 `key`）。
+    pub fn has_key(&self) -> bool {
+        !self.all_keys().is_empty()
+    }
+
+    /// 建構共享 `KeyRotator`。無任何金鑰時回傳 `None`（呼叫端應報「未設定」錯誤）。
+    pub fn build_rotator(&self) -> Option<Arc<crate::key_rotation::KeyRotator>> {
+        crate::key_rotation::KeyRotator::new(self.all_keys(), self.key_rotation_every)
     }
 }
 

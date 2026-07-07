@@ -41,6 +41,7 @@
   - 全域 Tab：灰色說明列 + 全域範疇 Session 清單（`conversations.project_id = 'global'` 哨兵）
 - **Session 持久化**：`conversations` 表新增 `project_id` 欄（含舊庫 ALTER 遷移與孤兒補綁）；新 Session 自動掛目前範疇
 - **API 金鑰 UX**：儲存後顯示遮罩金鑰（頭5尾4）+ SHA-256 指紋 + 常駐綠色「已儲存 ✓」
+  - **多金鑰組輪詢**（v0.8.4）：輸入框可貼單把（`sk-…`）或多把以逗號/換行分隔（`sk-a, sk-b, sk-c`）→ 自動建為 `[api] keys` 金鑰組；多 Key 時顯示「金鑰組：N 組（指紋 a, b, c）」；新增「金鑰輪詢間隔」DragValue（每把 Key 連續使用 N 次後輪替，預設 15）。`KeyRotator` 在多帳號間計數輪詢 + 429 強制換 Key，避免單帳號觸及免費方案 20 RPM 上限（見 05_SECURITY_MODEL）
 - **全域字級**：egui text_styles 拉高（Body 16 / Button 15.5 / Mono 14.5 / Small 13），右側代理人面板與各小字同步放大
 - **MCP 設定**：「＋ 新增伺服器」為真表單（名稱/指令/引數 → 寫入 config 並立即啟動）；伺服器 toggle 即時 start/stop；🗑 刪除；工作區 `.mcp.json`（Claude 格式）唯讀列出；App 啟動時自動啟動 config + .mcp.json 全部啟用伺服器
 - **技能設定區**：列出工作區 `.claude/skills/*/SKILL.md`（Claude 格式），對話以 `/名稱` 呼叫
@@ -102,7 +103,7 @@
 
 ## 設定頁
 
-- API 金鑰輸入（只顯示 hash 指紋；落地 `config.local.toml`）
+- API 金鑰輸入（只顯示 hash 指紋；落地 `config.local.toml`）；支援多金鑰組（逗號/換行分隔 → `keys` 陣列輪詢）+ 金鑰輪詢間隔設定
 - 模型路由表（flash/主力/高檔三檔位映射）
 - 沙盒組態（逾時、白名單增刪——增刪屬 Critical 動作走確認閘門）
 - 語言（zh-TW/en，自動偵測）、Shell 選擇（PowerShell/cmd）

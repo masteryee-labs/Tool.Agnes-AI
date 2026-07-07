@@ -3,6 +3,7 @@ mod db;
 pub mod diffview;
 mod locale;
 pub mod no_window;
+mod key_rotation;
 mod rate_limiter;
 mod parallel;
 mod sandbox;
@@ -36,6 +37,7 @@ pub use diffview::*;
 pub use locale::*;
 pub use sandbox::*;
 pub use rate_limiter::RateLimiter;
+pub use key_rotation::KeyRotator;
 pub use orchestrator::Orchestrator;
 pub use orchestrator::{SubAgent, ConfirmationGate, PendingAction, ActionRiskLevel, RealSubAgentDispatch};
 pub use agent::{AgentLoop, ToolCall, AuditResult, AgentStep, PendingState, AgentEngine, split_command_line, check_rs_compiles, run_rs_tests};
@@ -125,6 +127,10 @@ pub struct AppState {
     /// App 級共享令牌桶：所有 Agent / 多模態呼叫共用同一 20 RPM 桶，
     /// 即使多資料夾並行或多模態同時觸發也不會突破限速。
     pub rate_limiter: Arc<RateLimiter>,
+    /// App 級共享多 API Key 輪詢器：所有 Agent / 多模態 / 子代理呼叫共用，
+    /// 在多帳號金鑰間計數輪詢 + 429 強制換 Key，避免單帳號觸及免費方案速率上限。
+    /// 無任何金鑰時為 `None`（呼叫端應報「未設定」錯誤）。
+    pub key_rotator: Option<Arc<KeyRotator>>,
 }
 
 impl AppState {
@@ -139,11 +145,13 @@ impl AppState {
         let max_rpm = config.lock().unwrap().api.max_rpm;
         let rate_limiter = Arc::new(RateLimiter::new(max_rpm));
 
+        let key_rotator = config.lock().unwrap().api.build_rotator();
+
         let timeout_secs = config.lock().unwrap().sandbox.timeout_seconds;
         let http_client = Arc::new(Mutex::new(
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
-                .user_agent("Agnes-AI/0.8.3")
+                .user_agent("Agnes-AI/0.8.4")
                 .build()
                 .map_err(|e| format!("Failed to build pooled HTTP client: {}", e))?,
         ));
@@ -158,6 +166,7 @@ impl AppState {
             engine_runtime,
             http_client,
             rate_limiter,
+            key_rotator,
         })
     }
 }
